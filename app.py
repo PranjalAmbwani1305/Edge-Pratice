@@ -1,161 +1,98 @@
 import os
 import pandas as pd
+import numpy as np
 import streamlit as st
-from datetime import time
+from datetime import datetime, timedelta
 
-UPLOAD_FOLDER = "uploads"
-MASTER_CSV = "master_dataset.csv"
-MASTER_EXCEL = "master_dataset_colored.xlsx"
+MASTER_FILE = "master_dataset.csv"
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# Time window (as requested)
-START_TIME = time(3, 0, 0)   # 03:00
-END_TIME   = time(12, 0, 0)  # 12:00
-
-st.set_page_config(page_title="Master Dataset (Streamlit)", layout="centered")
-st.title("Master Dataset Manager (Flask Logic + Time Window)")
+st.set_page_config(page_title="Master Dataset Merger", layout="centered")
+st.title("Master Dataset (24-Hour) – Excel-Style Replace")
 
 # -------------------------------------------------
-# 🔧 Column mapping (CRITICAL FIX)
+# STEP 1: Generate random 24-hour master (ONE TIME)
 # -------------------------------------------------
-def map_to_flask_columns(df):
-    rename_map = {
-        "timestamp": "Timestamp",
-        "sensor": "Sensor_Name",
-        "status": "Status"
+def generate_master():
+    sensors = {
+        "temperature": 2,            # seconds
+        "light": 5,                  # seconds
+        "moisture": 4 * 60 * 60      # 4 hours
     }
-    df.columns = [rename_map.get(c.lower(), c) for c in df.columns]
+
+    start = datetime.strptime("2026-01-17 00:00:00", "%Y-%m-%d %H:%M:%S")
+    end = start + timedelta(hours=24)
+
+    rows = []
+
+    for sensor, interval in sensors.items():
+        t = start
+        while t < end:
+            value = round(np.random.uniform(10, 100), 2)
+            rows.append([t, sensor, value])
+            t += timedelta(seconds=interval)
+
+    df = pd.DataFrame(rows, columns=["Timestamp", "Sensor", "Value"])
+    df.to_csv(MASTER_FILE, index=False)
     return df
 
-# -------------------------------------------------
-# Summary (unchanged logic)
-# -------------------------------------------------
-def get_summary():
-    if not os.path.exists(MASTER_CSV):
-        return None
-    try:
-        df = pd.read_csv(MASTER_CSV)
-        df = map_to_flask_columns(df)
-
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
-
-        return {
-            "total_rows": len(df),
-            "start_time": df["Timestamp"].min(),
-            "end_time": df["Timestamp"].max(),
-            "breakdown": df["Sensor_Name"].value_counts().to_dict(),
-            "status_counts": (
-                df["Status"].value_counts().to_dict()
-                if "Status" in df.columns else {}
-            )
-        }
-    except Exception as e:
-        st.error(f"Error reading summary: {e}")
-        return None
 
 # -------------------------------------------------
-# Show summary
+# Load or create master
 # -------------------------------------------------
-summary = get_summary()
-if summary:
-    st.subheader("Master Dataset Summary")
-    st.write("Total Rows:", summary["total_rows"])
-    st.write("Start Time:", summary["start_time"])
-    st.write("End Time:", summary["end_time"])
-    st.json(summary["breakdown"])
-    st.json(summary["status_counts"])
+if not os.path.exists(MASTER_FILE):
+    master_df = generate_master()
 else:
-    st.info("No master dataset yet.")
+    master_df = pd.read_csv(MASTER_FILE, parse_dates=["Timestamp"])
+
+
+st.subheader("Current Master Dataset")
+st.write("Total rows:", len(master_df))
+st.dataframe(master_df.tail(10))
 
 st.divider()
 
 # -------------------------------------------------
-# Upload CSV (FLASK LOGIC + TIME WINDOW)
+# STEP 2: Upload user CSV and merge
 # -------------------------------------------------
-uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+uploaded = st.file_uploader(
+    "Upload CSV (Timestamp, Sensor, Value)",
+    type="csv"
+)
 
-if uploaded_file:
-    filepath = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
-    with open(filepath, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+if uploaded:
+    new_df = pd.read_csv(uploaded, parse_dates=["Timestamp"])
 
-    # 1. LOAD NEW DATA
-    new_df = pd.read_csv(filepath)
-    new_df = map_to_flask_columns(new_df)
-
-    # Safety check
-    if "Timestamp" not in new_df.columns or "Sensor_Name" not in new_df.columns:
-        st.error("CSV must contain timestamp and sensor columns")
+    required = {"Timestamp", "Sensor", "Value"}
+    if not required.issubset(new_df.columns):
+        st.error("CSV must contain: Timestamp, Sensor, Value")
         st.stop()
 
-    new_df["Timestamp"] = pd.to_datetime(new_df["Timestamp"], errors="coerce")
-    new_df["Sensor_Name"] = new_df["Sensor_Name"].astype(str).str.strip()
+    # CONCAT (NEW AFTER OLD)
+    combined = pd.concat([master_df, new_df], ignore_index=True)
 
-    # 🔑 TIME WINDOW (03:00 → 12:00)
-    new_df = new_df[
-        (new_df["Timestamp"].dt.time >= START_TIME) &
-        (new_df["Timestamp"].dt.time < END_TIME)
-    ]
+    # 🔑 EXCEL-STYLE REPLACE:
+    # keep LAST → uploaded row replaces master row
+    combined = combined.drop_duplicates(
+        subset=["Timestamp", "Sensor"],
+        keep="last"
+    )
 
-    new_df["Status"] = "New"
+    combined = combined.sort_values("Timestamp").reset_index(drop=True)
 
-    # 2. LOAD MASTER
-    if os.path.exists(MASTER_CSV):
-        master_df = pd.read_csv(MASTER_CSV)
-        master_df = map_to_flask_columns(master_df)
+    combined.to_csv(MASTER_FILE, index=False)
+    master_df = combined
 
-        master_df["Timestamp"] = pd.to_datetime(master_df["Timestamp"], errors="coerce")
-        master_df["Sensor_Name"] = master_df["Sensor_Name"].astype(str).str.strip()
-        master_df["Status"] = "Historical"
-    else:
-        master_df = pd.DataFrame()
-
-    # 3. OVERLAP DETECTION (UNCHANGED)
-    if not master_df.empty and not new_df.empty:
-        master_keys = set(zip(master_df["Timestamp"], master_df["Sensor_Name"]))
-        new_keys = set(zip(new_df["Timestamp"], new_df["Sensor_Name"]))
-        overlap_keys = master_keys.intersection(new_keys)
-
-        def mark_overlap(row):
-            if (row["Timestamp"], row["Sensor_Name"]) in overlap_keys:
-                return "Overlap"
-            return "Historical"
-
-        master_df["Status"] = master_df.apply(mark_overlap, axis=1)
-
-    # 4. MERGE
-    combined_df = pd.concat([master_df, new_df])
-
-    # 5. SORT & DEDUP (MASTER WINS)
-    combined_df = combined_df.sort_values("Timestamp")
-    combined_df = combined_df.drop_duplicates(
-        subset=["Timestamp", "Sensor_Name"],
-        keep="first"
-    ).reset_index(drop=True)
-
-    # 6. SAVE
-    combined_df.to_csv(MASTER_CSV, index=False)
-
-    os.remove(filepath)
-
-    st.success("CSV merged successfully")
-    st.write("Total rows in master:", len(combined_df))
-    st.dataframe(combined_df.tail(20))
+    st.success("Merged successfully (duplicates replaced)")
+    st.write("Total rows after merge:", len(master_df))
+    st.dataframe(master_df.tail(20))
 
 st.divider()
 
 # -------------------------------------------------
-# Downloads & Reset
+# Download master
 # -------------------------------------------------
-if os.path.exists(MASTER_CSV):
-    st.download_button(
-        "Download Master CSV",
-        open(MASTER_CSV, "rb"),
-        file_name="master_dataset.csv"
-    )
-
-if st.button("Reset Master Dataset"):
-    if os.path.exists(MASTER_CSV):
-        os.remove(MASTER_CSV)
-    st.success("Master dataset reset. Reload page.")
+st.download_button(
+    "Download Master CSV",
+    open(MASTER_FILE, "rb"),
+    file_name="master_dataset.csv"
+)
