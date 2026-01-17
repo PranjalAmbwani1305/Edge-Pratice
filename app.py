@@ -3,14 +3,18 @@ import pandas as pd
 import os
 from datetime import time
 
-st.set_page_config(page_title="CSV Merge System", layout="centered")
-st.title("Daily CSV Merge with Master (Ascending Date Order)")
+# ---------------------------------
+# App Config
+# ---------------------------------
+st.set_page_config(page_title="Daily CSV Ingestion", layout="centered")
+st.title("Daily CSV Ingestion (12–12 Master Dataset)")
+st.write("Uploads replace overlapping data and keep the master dataset clean and ordered.")
 
 MASTER_FILE = "master_dataset.csv"
 MASTER_CUTOFF = time(12, 0, 0)
 
 # ---------------------------------
-# Load master dataset
+# Load or initialize master dataset
 # ---------------------------------
 if os.path.exists(MASTER_FILE):
     master_df = pd.read_csv(MASTER_FILE, parse_dates=["timestamp"])
@@ -18,11 +22,6 @@ else:
     master_df = pd.DataFrame(
         columns=["timestamp", "sensor", "voltage", "adc_value"]
     )
-
-# Build existing key set
-existing_keys = set(
-    master_df["timestamp"].astype(str) + "_" + master_df["sensor"]
-)
 
 # ---------------------------------
 # Upload CSV
@@ -33,15 +32,20 @@ if uploaded_file is not None:
     try:
         df = pd.read_csv(uploaded_file, parse_dates=["timestamp"])
 
+        # Validate schema
         required_cols = {"timestamp", "sensor", "voltage", "adc_value"}
         if not required_cols.issubset(df.columns):
             st.error("CSV must contain: timestamp, sensor, voltage, adc_value")
         else:
-            # Detect start time
+            # ---------------------------------
+            # Detect CSV start time
+            # ---------------------------------
             start_time = df["timestamp"].min().time()
             st.info(f"Detected CSV start time: {start_time}")
 
-            # Filter relevant window (start → 12:00)
+            # ---------------------------------
+            # Keep only start_time → 12:00
+            # ---------------------------------
             df = df[
                 (df["timestamp"].dt.time >= start_time) &
                 (df["timestamp"].dt.time < MASTER_CUTOFF)
@@ -49,36 +53,45 @@ if uploaded_file is not None:
 
             st.write("Records after time filtering:", len(df))
 
-            # Remove common records
+            # ---------------------------------
+            # REPLACE OVERLAP (LATEST WINS)
+            # ---------------------------------
             df_keys = df["timestamp"].astype(str) + "_" + df["sensor"]
-            df = df[~df_keys.isin(existing_keys)]
 
-            st.success(f"New records added: {len(df)}")
+            # Remove overlapping rows from master
+            master_df = master_df[
+                ~(
+                    master_df["timestamp"].astype(str) + "_" +
+                    master_df["sensor"]
+                ).isin(df_keys)
+            ]
 
-            # Merge
+            # Append new data
             master_df = pd.concat([master_df, df], ignore_index=True)
 
-            # ✅ SORT BY DATE ASCENDING (IMPORTANT)
+            # ---------------------------------
+            # Sort ASCENDING by timestamp
+            # ---------------------------------
             master_df.sort_values(
                 by="timestamp",
                 ascending=True,
                 inplace=True
             )
 
-            # Save
+            # Save master dataset
             master_df.to_csv(MASTER_FILE, index=False)
 
-            # Update key set
-            existing_keys.update(
-                df["timestamp"].astype(str) + "_" + df["sensor"]
-            )
+            st.success(f"Records added / replaced: {len(df)}")
 
-            st.subheader("Master Dataset (Ascending Date Order)")
+            # ---------------------------------
+            # Summary
+            # ---------------------------------
+            st.subheader("Master Dataset Summary")
             st.write("Total records:", len(master_df))
             st.dataframe(master_df.tail(15))
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error processing file: {e}")
 
 # ---------------------------------
 # Download master dataset
@@ -86,7 +99,7 @@ if uploaded_file is not None:
 if os.path.exists(MASTER_FILE):
     with open(MASTER_FILE, "rb") as f:
         st.download_button(
-            "Download Master Dataset",
+            label="Download Master Dataset",
             data=f,
             file_name="master_dataset.csv",
             mime="text/csv"
