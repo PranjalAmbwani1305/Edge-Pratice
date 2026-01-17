@@ -24,11 +24,7 @@ st.set_page_config(
 # Custom CSS for "Card" look and cleaner fonts
 st.markdown("""
     <style>
-    /* Main Background color */
-    .stApp {
-        background-color: #f8f9fa;
-    }
-    /* Metric Cards Styling */
+    .stApp { background-color: #f8f9fa; }
     div[data-testid="stMetric"] {
         background-color: #ffffff;
         border: 1px solid #e0e0e0;
@@ -36,16 +32,7 @@ st.markdown("""
         border-radius: 8px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
-    /* Header Styling */
-    h1, h2, h3 {
-        font-family: 'Segoe UI', sans-serif;
-        color: #2c3e50;
-    }
-    /* Sidebar Styling */
-    section[data-testid="stSidebar"] {
-        background-color: #ffffff;
-        border-right: 1px solid #e0e0e0;
-    }
+    h1, h2, h3 { font-family: 'Segoe UI', sans-serif; color: #2c3e50; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -63,7 +50,7 @@ def load_master():
     return pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status'])
 
 def generate_spec_data():
-    """Generates Golden Dataset based on strict specs."""
+    """Generates the Golden Dataset for EXACTLY 3 Sensors."""
     start = datetime(2024, 1, 1, 0, 0, 0)
     duration = 24 * 3600
     
@@ -76,16 +63,19 @@ def generate_spec_data():
             'Voltage_V': np.round(volts, 4), 'ADC_Value': adcs, 'Status': 'Historical'
         })
     
-    # Strict Specs: Temp(2s), Moist(4h), Light(5s)
-    return pd.concat([
-        make("Temperature", 2, 2.0, 4.0),
-        make("Moisture", 14400, 1.2, 3.0),
-        make("Light", 5, 0.0, 5.0)
-    ]).sort_values('Timestamp').reset_index(drop=True)
+    # 1. Temperature (Every 2s)
+    df1 = make("Temperature", 2, 2.0, 4.0)
+    
+    # 2. Moisture (Every 4h)
+    df2 = make("Moisture", 14400, 1.2, 3.0)
+    
+    # 3. Light (Every 5s)
+    df3 = make("Light", 5, 0.0, 5.0)
+    
+    return pd.concat([df1, df2, df3]).sort_values('Timestamp').reset_index(drop=True)
 
 def process_merge_fast(master_df, new_df):
     """High-Performance Merge Logic."""
-    # Standardize
     new_df.columns = new_df.columns.str.strip().str.title()
     rename_map = {'Time': 'Timestamp', 'Date': 'Timestamp', 'Sensor': 'Sensor_Name', 
                   'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 'Adc': 'ADC_Value'}
@@ -98,7 +88,6 @@ def process_merge_fast(master_df, new_df):
     
     if not master_df.empty:
         master_df['Status'] = 'Historical'
-        # Vectorized Overlap Check
         m_idx = pd.MultiIndex.from_frame(master_df[['Timestamp', 'Sensor_Name']])
         n_idx = pd.MultiIndex.from_frame(new_df[['Timestamp', 'Sensor_Name']])
         master_df.loc[m_idx.isin(n_idx), 'Status'] = 'Overlap'
@@ -129,7 +118,7 @@ def get_analytics(df):
             X = clean[['Voltage_V']]
             y = clean['Sensor_Name']
             clf = RandomForestClassifier(n_estimators=10, random_state=42)
-            clf.fit(X, y) # Train on all for simple recal accuracy
+            clf.fit(X, y)
             report = classification_report(y, clf.predict(X), output_dict=True, zero_division=0)
             for s in results:
                 if s in report: results[s]['ai'] = report[s]['recall'] * 100
@@ -149,8 +138,8 @@ with st.sidebar:
     st.markdown("---")
     
     st.subheader("1. Data Ingestion")
-    if st.button("⚡ Initialize Golden Data", help="Generates 24hr spec-compliant data"):
-        with st.spinner("Simulating sensors..."):
+    if st.button("⚡ Initialize 3-Sensor Data", help="Generates Temp, Moisture, Light"):
+        with st.spinner("Generating 3 Sensors..."):
             new_data = generate_spec_data()
             new_data.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = new_data
@@ -181,10 +170,9 @@ with st.sidebar:
 col_head1, col_head2 = st.columns([3, 1])
 with col_head1:
     st.title("SensorEdge Analytics")
-    st.caption("Real-time Edge Device Monitoring System")
+    st.caption("3-Sensor Edge Device Monitoring")
 
 with col_head2:
-    # Live Status Badge
     status = "Online" if not master_df.empty else "Offline"
     color = "green" if not master_df.empty else "gray"
     st.markdown(f"""
@@ -195,11 +183,9 @@ with col_head2:
         </div>
     """, unsafe_allow_html=True)
 
-# Tabs for Organization
 tab_dash, tab_data = st.tabs(["📊 Executive Dashboard", "📋 Data Inspector"])
 
 with tab_dash:
-    # Top KPI Cards
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     total_recs = len(master_df)
     unique_sensors = master_df['Sensor_Name'].nunique() if not master_df.empty else 0
@@ -207,7 +193,6 @@ with tab_dash:
     kpi1.metric("Total Records", f"{total_recs:,}")
     kpi2.metric("Active Sensors", unique_sensors)
     
-    # Calculate Analytics
     analytics = get_analytics(master_df)
     avg_hw = np.mean([v['hw'] for v in analytics.values()]) if analytics else 0
     avg_ai = np.mean([v['ai'] for v in analytics.values()]) if analytics else 0
@@ -215,64 +200,62 @@ with tab_dash:
     kpi3.metric("Avg. Hardware Fidelity", f"{avg_hw:.1f}%")
     kpi4.metric("Avg. AI Confidence", f"{avg_ai:.1f}%")
     
-    st.markdown("### 📈 Sensor Telemetry")
-    if not master_df.empty:
-        col_chart, col_acc = st.columns([2, 1])
+    st.divider()
+    
+    # --- TABLE SECTION (Replaces Graph) ---
+    st.markdown("### 🎯 Sensor Accuracy Matrix")
+    if not master_df.empty and analytics:
+        rows = []
+        for s, m in analytics.items():
+            rows.append({
+                "Sensor Name": s, 
+                "Record Count": f"{m['count']:,}",
+                "Hardware Accuracy (ADC)": m['hw']/100, 
+                "AI Model Confidence": m['ai']/100
+            })
         
-        with col_chart:
-            st.caption("Voltage Readings over Time")
-            # Pivot for charting
-            chart_df = master_df.pivot_table(index='Timestamp', columns='Sensor_Name', values='Voltage_V', aggfunc='first')
-            st.line_chart(chart_df, height=300)
-            
-        with col_acc:
-            st.caption("Sensor-Wise Performance")
-            if analytics:
-                rows = []
-                for s, m in analytics.items():
-                    rows.append({"Sensor": s, "HW Acc": m['hw']/100, "AI Acc": m['ai']/100})
-                
-                # Rich Table for Accuracy
-                st.dataframe(
-                    pd.DataFrame(rows),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "HW Acc": st.column_config.ProgressColumn("Hardware", format="%.1f%%", min_value=0, max_value=1),
-                        "AI Acc": st.column_config.ProgressColumn("AI Model", format="%.1f%%", min_value=0, max_value=1)
-                    }
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Sensor Name": st.column_config.TextColumn("Sensor Type", help="Source Sensor"),
+                "Record Count": st.column_config.TextColumn("Samples"),
+                "Hardware Accuracy (ADC)": st.column_config.ProgressColumn(
+                    "Hardware Check", format="%.1f%%", min_value=0, max_value=1
+                ),
+                "AI Model Confidence": st.column_config.ProgressColumn(
+                    "AI Prediction", format="%.1f%%", min_value=0, max_value=1
                 )
+            }
+        )
     else:
-        st.info("System is offline. Please initialize data from the sidebar.")
+        st.info("System is offline. Please initialize 3-Sensor data from the sidebar.")
 
 with tab_data:
     st.markdown("### 🗃️ Master Data Ledger")
     
     if not master_df.empty:
-        # Filter Controls
         c1, c2 = st.columns([3, 1])
         with c1:
             filter_opt = st.radio("Status Filter:", ["All", "New (Green)", "Overlap (Red)", "Historical"], horizontal=True)
         with c2:
             st.download_button("📥 Export CSV", master_df.to_csv(index=False).encode('utf-8'), "sensor_data.csv", "text/csv")
             
-        # Filter Logic
         view_df = master_df.copy()
         if filter_opt == "New (Green)": view_df = view_df[view_df['Status'] == 'New']
         elif filter_opt == "Overlap (Red)": view_df = view_df[view_df['Status'] == 'Overlap']
         elif filter_opt == "Historical": view_df = view_df[view_df['Status'] == 'Historical']
         
-        # Color Styling Logic
         def row_styler(row):
             if row['Status'] == 'New': return ['background-color: #d1e7dd; color: #0f5132'] * len(row)
             if row['Status'] == 'Overlap': return ['background-color: #f8d7da; color: #842029'] * len(row)
             return [''] * len(row)
             
-        # Robust Display
         try:
             st.dataframe(view_df.style.apply(row_styler, axis=1), use_container_width=True, height=500)
         except:
-            st.dataframe(view_df, use_container_width=True) # Fallback
+            st.dataframe(view_df, use_container_width=True)
             
     else:
         st.warning("No data found.")
