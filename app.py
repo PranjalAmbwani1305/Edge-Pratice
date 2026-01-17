@@ -163,6 +163,7 @@ with st.sidebar:
             new_master = generate_demo_data()
             new_master.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = new_master
+            # Note: We do NOT use st.write() here to avoid blue junk text
             st.success("Generated 60k+ records!")
             time.sleep(1)
             st.rerun()
@@ -241,12 +242,16 @@ def color_status(val):
     return ''
 
 if not master_df.empty:
+    # --- FIX 1: Robust Styler (Prevents the crash) ---
     try:
+        # Modern Pandas (2.1+) uses .map()
         st.dataframe(master_df.style.map(color_status, subset=['Status']), use_container_width=True)
     except AttributeError:
+        # Older Pandas uses .applymap()
         try:
              st.dataframe(master_df.style.applymap(color_status, subset=['Status']), use_container_width=True)
         except Exception:
+             # If styling fails entirely, show raw data (safety net)
              st.dataframe(master_df, use_container_width=True)
     except Exception:
         st.dataframe(master_df, use_container_width=True)
