@@ -15,8 +15,9 @@ ADC_MAX = 1023
 
 # --- 1. Page Config & CSS ---
 st.set_page_config(
-    page_title="SensorEdge", 
+    page_title="SensorEdge Enterprise", 
     layout="wide", 
+    page_icon="⚡",
     initial_sidebar_state="expanded"
 )
 
@@ -37,16 +38,16 @@ st.markdown("""
 # --- 2. Core Logic ---
 
 def normalize_sensor_names(name):
-    """Forces all variations (node_1, light, LIGHT) to standard 3 names."""
+    """Forces all variations to standard 3 names."""
     n = str(name).strip().lower()
     if 'temp' in n or 'node_1' in n or 'node 1' in n: return 'Temperature'
     if 'moist' in n or 'node_2' in n or 'node 2' in n: return 'Moisture'
     if 'light' in n or 'node_3' in n or 'node 3' in n: return 'Light'
-    return n.title() # Fallback for unknown sensors
+    return n.title() 
 
 @st.cache_data(ttl=60)
 def load_and_clean_master():
-    """Loads data AND performs a deep clean to fix '6 sensor' bug."""
+    """Loads data and GUARANTEES all columns exist to prevent KeyErrors."""
     if os.path.exists(MASTER_CSV):
         try:
             df = pd.read_csv(MASTER_CSV)
@@ -54,22 +55,34 @@ def load_and_clean_master():
             # 1. Standardize Columns
             df.columns = df.columns.str.strip().str.title()
             rename_map = {'Time': 'Timestamp', 'Date': 'Timestamp', 'Sensor': 'Sensor_Name', 
-                          'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 'Adc': 'ADC_Value'}
+                          'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 'Adc': 'ADC_Value',
+                          'Adc Value': 'ADC_Value', 'Adc_Value': 'ADC_Value'} # Catch all casing
             df.rename(columns=rename_map, inplace=True)
             
+            # 2. SCHEMA ENFORCER (The Fix for KeyError)
+            required_cols = ['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status']
+            for col in required_cols:
+                if col not in df.columns:
+                    if col == 'Voltage_V': df[col] = 0.0
+                    elif col == 'ADC_Value': df[col] = 0
+                    elif col == 'Status': df[col] = 'Historical'
+                    else: df[col] = None
+
+            # 3. Data Cleaning
             if 'Timestamp' in df.columns:
                 df['Timestamp'] = pd.to_datetime(df['Timestamp']).dt.round('1s')
-                
-            # 2. FORCE FIX SENSOR NAMES (The Self-Healing Step)
+            
             if 'Sensor_Name' in df.columns:
                 df['Sensor_Name'] = df['Sensor_Name'].apply(normalize_sensor_names)
                 
-            # 3. FORCE REMOVE DUPLICATES (Clean up old messes)
+            # 4. Remove Duplicates
             df = df.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
             
             return df
-        except:
+        except Exception as e:
+            # If CSV is totally broken, return empty
             pass
+            
     return pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status'])
 
 def generate_spec_data():
@@ -93,7 +106,7 @@ def generate_spec_data():
     ]).sort_values('Timestamp').reset_index(drop=True)
 
 def process_merge_fast(master_df, new_df):
-    """Turbo Merge: Optimizes for 100k+ rows."""
+    """Turbo Merge with Auto-Fixes."""
     
     # 1. Clean Column Names
     new_df.columns = new_df.columns.str.strip().str.title()
@@ -110,10 +123,9 @@ def process_merge_fast(master_df, new_df):
     if not master_df.empty:
         master_df['Timestamp'] = pd.to_datetime(master_df['Timestamp']).dt.round('1s')
 
-    # 3. Apply Name Mapping (Fixes 'light' vs 'Light')
     new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
     
-    # 4. Fast Fill & Fix 0% Accuracy
+    # 3. Force Column Existence (Fixes Crash)
     if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
     if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
     
@@ -124,20 +136,18 @@ def process_merge_fast(master_df, new_df):
     mask_a_missing = (new_df['ADC_Value'] == 0) & (new_df['Voltage_V'] > 0)
     new_df.loc[mask_a_missing, 'ADC_Value'] = (new_df.loc[mask_a_missing, 'Voltage_V'] / V_REF * ADC_MAX).astype(int)
 
-    # 5. Fast Status Update
+    # 4. Status Update
     new_df['Status'] = 'New'
     if not master_df.empty:
         master_df['Status'] = 'Historical'
-        # Set Index for instantaneous lookup
         m_idx = master_df.set_index(['Timestamp', 'Sensor_Name']).index
         n_idx = new_df.set_index(['Timestamp', 'Sensor_Name']).index
         master_df.loc[master_df.set_index(['Timestamp', 'Sensor_Name']).index.isin(n_idx), 'Status'] = 'Overlap'
 
-    # 6. Concat & Deduplicate
+    # 5. Concat & Deduplicate
     combined = pd.concat([master_df, new_df])
     combined = combined.sort_values('Timestamp')
     
-    # Drop duplicates (Keep first = keeps Master/Red rows)
     before_len = len(combined)
     final = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
     removed = before_len - len(final)
@@ -145,19 +155,22 @@ def process_merge_fast(master_df, new_df):
     return final, f"Merged! Removed {removed} duplicates."
 
 def get_analytics(df):
-    """Calculates accuracy on a sample to stay fast."""
-    if df.empty or 'Voltage_V' not in df.columns: return {}
+    """Safe Analytics Calculation."""
+    # Crash Guard: If columns are missing, return empty dict immediately
+    if df.empty or 'Voltage_V' not in df.columns or 'ADC_Value' not in df.columns: 
+        return {}
     
     results = {}
     groups = df.groupby('Sensor_Name')
     
     for sensor, sub in groups:
         count = len(sub)
+        # Vectorized HW Check
         exp = (sub['Voltage_V'] / V_REF * ADC_MAX).astype(int)
         hw = (np.abs(sub['ADC_Value'] - exp) <= 1).mean() * 100
         results[sensor] = {'count': count, 'hw': hw, 'ai': 0.0}
 
-    # AI Check (Limit training data for speed)
+    # AI Check
     clean = df.dropna(subset=['Voltage_V', 'Sensor_Name'])
     if clean['Sensor_Name'].nunique() >= 2:
         sample_size = min(1000, len(clean))
@@ -176,7 +189,6 @@ def get_analytics(df):
     return results
 
 # --- 3. App State ---
-# This line now calls the CLEANING function instead of just loading
 if 'master_df' not in st.session_state:
     st.session_state.master_df = load_and_clean_master()
 
@@ -219,7 +231,6 @@ with st.sidebar:
 st.title("SensorEdge Pro ⚡")
 
 if not master_df.empty:
-    # Top Stats
     k1, k2, k3, k4 = st.columns(4)
     analytics = get_analytics(master_df)
     
@@ -236,7 +247,6 @@ if not master_df.empty:
     
     st.divider()
     
-    # TABS
     tab1, tab2 = st.tabs(["🎯 Accuracy Matrix", "🔍 Data Inspector (Fast View)"])
     
     with tab1:
@@ -248,7 +258,7 @@ if not master_df.empty:
                     "AI Accuracy": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1)
                 })
         else:
-            st.info("No analytics data.")
+            st.info("No analytics data available (Columns missing).")
             
     with tab2:
         st.caption(f"Showing top 1,000 rows of {len(master_df):,} for performance. Download full file below.")
