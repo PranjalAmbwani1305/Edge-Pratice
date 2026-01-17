@@ -34,7 +34,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. Generation Logic (sensor_database.ipynb) ---
+# --- 2. Logic: Generation ---
 def generate_sensor_data(sensor_name, interval_seconds, v_min, v_max, duration_hours, start_time):
     #
     total_seconds = duration_hours * 3600
@@ -59,18 +59,15 @@ def generate_full_dataset(start_date_obj):
     start_time = datetime.combine(start_date_obj, datetime.min.time())
     duration = 24 
     
-    # 1. Temperature (2s, 2V-4V)
     df_temp = generate_sensor_data("Temperature", 2, 2.0, 4.0, duration, start_time)
-    # 2. Moisture (4h, 1.2V-3V)
     df_moist = generate_sensor_data("Moisture", 14400, 1.2, 3.0, duration, start_time)
-    # 3. Light (5s, 0V-5V)
     df_light = generate_sensor_data("Light", 5, 0.0, 5.0, duration, start_time)
     
     full_df = pd.concat([df_temp, df_moist, df_light])
     full_df = full_df.sort_values(by="Timestamp").reset_index(drop=True)
     return full_df
 
-# --- 3. Merge Logic (Update_Master.ipynb) ---
+# --- 3. Logic: Merge ---
 def normalize_sensor_names(name):
     n = str(name).strip().lower()
     if 'temp' in n or 'node_1' in n: return 'Temperature'
@@ -79,9 +76,6 @@ def normalize_sensor_names(name):
     return n.title()
 
 def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
-    """
-    Replicates the EXACT logic and print statements from Update_Master.ipynb
-    """
     log_buffer = []
     log_buffer.append(f"Loading Master: {MASTER_CSV}...")
     log_buffer.append(f"Loading New Data: {filename}...")
@@ -97,21 +91,17 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
     new_df.rename(columns=rename_map, inplace=True)
     new_df = new_df.loc[:, ~new_df.columns.duplicated()]
 
-    # Normalize
     new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp']).dt.round('1s')
     new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
     
-    # Auto-Fix Missing or Bad Numbers
     if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
     if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
     
-    # Convert to numeric, forcing errors to NaN, then filling with 0
     new_df['Voltage_V'] = pd.to_numeric(new_df['Voltage_V'], errors='coerce').fillna(0.0)
     new_df['ADC_Value'] = pd.to_numeric(new_df['ADC_Value'], errors='coerce').fillna(0).astype(int)
-    
     new_df['Status'] = 'New'
 
-    # 2. Logic: Identify Overlaps (Visuals only)
+    # 2. Logic: Overlaps
     if not master_df.empty:
         master_df['Timestamp'] = pd.to_datetime(master_df['Timestamp']).dt.round('1s')
         master_df['Status'] = 'Historical'
@@ -119,7 +109,7 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
         n_idx = new_df.set_index(['Timestamp', 'Sensor_Name']).index
         master_df.loc[m_idx.isin(n_idx), 'Status'] = 'Overlap'
 
-    # 3. CORE MERGE LOGIC
+    # 3. Notebook Merge Logic
     log_buffer.append("Merging datasets...")
     
     old_count = len(master_df)
@@ -127,7 +117,7 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
     
     combined = pd.concat([master_df, new_df])
     
-    # "keep='first' means if there is an overlap, we keep the value from File 1"
+    # keep='first' logic
     final_df = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
     final_df = final_df.sort_values(by='Timestamp').reset_index(drop=True)
     
@@ -151,20 +141,11 @@ def get_analytics(df):
     if df.empty or 'Voltage_V' not in df.columns: return {}
     results = {}
     
-    # --- CRITICAL FIX FOR IntCastingNaNError ---
-    # Ensure all data is numeric and non-empty before processing
-    
     for sensor, sub_raw in df.groupby('Sensor_Name'):
-        # Work on a copy to avoid SettingWithCopy warnings
         sub = sub_raw.copy()
-        
-        # 1. Force Voltage to Float, replace errors/NaNs with 0.0
         sub['Voltage_V'] = pd.to_numeric(sub['Voltage_V'], errors='coerce').fillna(0.0)
-        
-        # 2. Force ADC to Numeric, replace errors/NaNs with 0
         sub['ADC_Value'] = pd.to_numeric(sub['ADC_Value'], errors='coerce').fillna(0)
         
-        # 3. Calculate
         if len(sub) > 0:
             exp = (sub['Voltage_V'] / V_REF * ADC_MAX).astype(int)
             hw = (np.abs(sub['ADC_Value'] - exp) <= 1).mean() * 100
@@ -174,7 +155,6 @@ def get_analytics(df):
         results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
     
     # AI Check
-    # Filter for valid rows only for the AI model
     clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
     clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
     
@@ -190,20 +170,22 @@ def get_analytics(df):
 
 # --- 4. Main App ---
 
+# Initialize State
 if 'master_df' not in st.session_state:
     if os.path.exists(MASTER_CSV):
         try:
             st.session_state.master_df = pd.read_csv(MASTER_CSV)
             st.session_state.master_df['Timestamp'] = pd.to_datetime(st.session_state.master_df['Timestamp'])
-            
-            # Initial Cleanup on Load
             st.session_state.master_df['Voltage_V'] = pd.to_numeric(st.session_state.master_df['Voltage_V'], errors='coerce').fillna(0.0)
             st.session_state.master_df['ADC_Value'] = pd.to_numeric(st.session_state.master_df['ADC_Value'], errors='coerce').fillna(0).astype(int)
-            
         except:
             st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
     else:
         st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
+
+# Initialize Merge Log State
+if 'merge_log' not in st.session_state:
+    st.session_state.merge_log = None
 
 master_df = st.session_state.master_df
 
@@ -212,20 +194,19 @@ with st.sidebar:
     st.title("Control Panel")
     st.markdown("---")
     
-    st.subheader("1. Initialize (Notebook Logic)")
-    
+    st.subheader("1. Initialize")
     if st.button("Generate & Reset"):
         with st.spinner("Generating..."):
-            # Use current date as default
             start_date = datetime.now().date()
             new_data = generate_full_dataset(start_date)
             new_data.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = new_data
+            st.session_state.merge_log = None # Clear old log
             time.sleep(0.5)
             st.rerun()
 
     st.markdown("---")
-    st.subheader("2. Merge (Notebook Logic)")
+    st.subheader("2. Merge")
     uploaded = st.file_uploader("Upload CSV", type=['csv'])
     
     if uploaded:
@@ -235,17 +216,29 @@ with st.sidebar:
             
             final_df.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = final_df
-            st.success("Script Finished")
-            st.code(log_msg)
+            st.session_state.merge_log = log_msg # Save log to state
+            
+            # Force Rerun to update main page
+            st.rerun()
 
     st.markdown("---")
     if st.button("Factory Reset"):
         if os.path.exists(MASTER_CSV): os.remove(MASTER_CSV)
         st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
+        st.session_state.merge_log = None
         st.rerun()
 
-# Dashboard
+# --- Main Dashboard ---
 st.title("SensorEdge")
+
+# --- Display Merge Log Here (Top of Main Page) ---
+if st.session_state.merge_log:
+    st.success("Merge Completed Successfully")
+    st.code(st.session_state.merge_log, language="text")
+    if st.button("Clear Log"):
+        st.session_state.merge_log = None
+        st.rerun()
+    st.divider()
 
 if not master_df.empty:
     k1, k2, k3, k4 = st.columns(4)
