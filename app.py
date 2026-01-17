@@ -7,10 +7,17 @@ from datetime import datetime, timedelta
 MASTER_FILE = "master_dataset.csv"
 
 st.set_page_config(page_title="Master Dataset Merger", layout="centered")
-st.title("Master Dataset (24-Hour) – Excel-Style Replace")
+st.title("Master Dataset – Strict CSV Validation")
 
 # -------------------------------------------------
-# STEP 1: Generate random 24-hour master (one time)
+# Utility: normalize column names
+# -------------------------------------------------
+def normalize_columns(df):
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
+
+# -------------------------------------------------
+# STEP 1: Generate random 24-hour master (ONE TIME)
 # -------------------------------------------------
 def generate_master():
     sensors = {
@@ -31,10 +38,9 @@ def generate_master():
             rows.append([t, sensor, value])
             t += timedelta(seconds=interval)
 
-    df = pd.DataFrame(rows, columns=["Timestamp", "Sensor", "Value"])
+    df = pd.DataFrame(rows, columns=["timestamp", "sensor", "value"])
     df.to_csv(MASTER_FILE, index=False)
     return df
-
 
 # -------------------------------------------------
 # Load or create master
@@ -43,8 +49,8 @@ if not os.path.exists(MASTER_FILE):
     master_df = generate_master()
 else:
     master_df = pd.read_csv(MASTER_FILE)
-    master_df["Timestamp"] = pd.to_datetime(master_df["Timestamp"], errors="coerce")
-
+    master_df = normalize_columns(master_df)
+    master_df["timestamp"] = pd.to_datetime(master_df["timestamp"], errors="coerce")
 
 st.subheader("Current Master Dataset")
 st.write("Total rows:", len(master_df))
@@ -53,54 +59,44 @@ st.dataframe(master_df.tail(10))
 st.divider()
 
 # -------------------------------------------------
-# STEP 2: Upload CSV and merge (SAFE)
+# STEP 2: Upload user CSV (STRICT VALIDATION)
 # -------------------------------------------------
 uploaded = st.file_uploader(
-    "Upload CSV (timestamp + sensor + value)",
+    "Upload CSV (must contain sensor and value columns)",
     type="csv"
 )
 
 if uploaded:
-    # Read WITHOUT parse_dates
     new_df = pd.read_csv(uploaded)
+    new_df = normalize_columns(new_df)
 
-    # Normalize column names
-    new_df.columns = [c.strip().lower() for c in new_df.columns]
-
-    # Detect timestamp column
-    if "timestamp" not in new_df.columns:
-        st.error("CSV must contain a timestamp column")
-        st.stop()
-
+    # 🚨 STRICT SCHEMA CHECK
     if "sensor" not in new_df.columns or "value" not in new_df.columns:
-        st.error("CSV must contain sensor and value columns")
+        st.error("CSV must contain 'sensor' and 'value' columns")
         st.stop()
 
-    # Convert timestamp safely
-    new_df["timestamp"] = pd.to_datetime(new_df["timestamp"], errors="coerce")
+    # Timestamp is optional
+    if "timestamp" not in new_df.columns:
+        st.error("CSV must contain 'timestamp' column as well")
+        st.stop()
 
-    # Rename to master schema
-    new_df = new_df.rename(columns={
-        "timestamp": "Timestamp",
-        "sensor": "Sensor",
-        "value": "Value"
-    })
+    new_df["timestamp"] = pd.to_datetime(new_df["timestamp"], errors="coerce")
 
     # CONCAT (NEW AFTER OLD)
     combined = pd.concat([master_df, new_df], ignore_index=True)
 
     # 🔑 EXCEL-STYLE REPLACE
     combined = combined.drop_duplicates(
-        subset=["Timestamp", "Sensor"],
+        subset=["timestamp", "sensor"],
         keep="last"
     )
 
-    combined = combined.sort_values("Timestamp").reset_index(drop=True)
+    combined = combined.sort_values("timestamp").reset_index(drop=True)
 
     combined.to_csv(MASTER_FILE, index=False)
     master_df = combined
 
-    st.success("Merged successfully (duplicates replaced)")
+    st.success("CSV merged successfully (duplicates replaced)")
     st.write("Total rows after merge:", len(master_df))
     st.dataframe(master_df.tail(20))
 
