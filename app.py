@@ -5,14 +5,21 @@ import streamlit as st
 # ---------------------------------
 # App Configuration
 # ---------------------------------
-st.set_page_config(page_title="CSV Master Merge", layout="centered")
-st.title("Master Dataset Manager (Streamlit Version)")
+st.set_page_config(page_title="Master Dataset Manager", layout="centered")
+st.title("Master Dataset Manager (Streamlit)")
 
 UPLOAD_FOLDER = "uploads"
 MASTER_CSV = "master_dataset.csv"
 MASTER_EXCEL = "master_dataset_colored.xlsx"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# ---------------------------------
+# Utility: Normalize column names
+# ---------------------------------
+def normalize_columns(df):
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
 
 # ---------------------------------
 # Utility: Load Summary
@@ -22,26 +29,31 @@ def get_summary():
         return None
     try:
         df = pd.read_csv(MASTER_CSV)
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+        df = normalize_columns(df)
+
+        # Required safety checks
+        if "timestamp" not in df.columns or "sensor" not in df.columns:
+            return None
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
         status_counts = (
-            df["Status"].value_counts().to_dict()
-            if "Status" in df.columns
+            df["status"].value_counts().to_dict()
+            if "status" in df.columns
             else {}
         )
 
         summary = {
             "total_rows": len(df),
-            "start_time": df["Timestamp"].min(),
-            "end_time": df["Timestamp"].max(),
-            "breakdown": df["Sensor_Name"].value_counts().to_dict(),
+            "start_time": df["timestamp"].min(),
+            "end_time": df["timestamp"].max(),
+            "breakdown": df["sensor"].value_counts().to_dict(),
             "status_counts": status_counts,
         }
         return summary
     except Exception as e:
         st.error(f"Error reading summary: {e}")
         return None
-
 
 # ---------------------------------
 # Show Summary
@@ -68,7 +80,7 @@ st.divider()
 # File Upload
 # ---------------------------------
 uploaded_file = st.file_uploader(
-    "Upload CSV file",
+    "Drag and drop CSV file here",
     type=["csv"]
 )
 
@@ -80,9 +92,17 @@ if uploaded_file:
     # 1. Load NEW data (Green)
     try:
         new_df = pd.read_csv(filepath)
-        new_df["Timestamp"] = pd.to_datetime(new_df["Timestamp"], errors="coerce")
-        new_df["Sensor_Name"] = new_df["Sensor_Name"].astype(str).str.strip()
-        new_df["Status"] = "New"
+        new_df = normalize_columns(new_df)
+
+        required_cols = {"timestamp", "sensor", "voltage", "adc_value"}
+        if not required_cols.issubset(new_df.columns):
+            st.error("CSV must contain: timestamp, sensor, voltage, adc_value")
+            st.stop()
+
+        new_df["timestamp"] = pd.to_datetime(new_df["timestamp"], errors="coerce")
+        new_df["sensor"] = new_df["sensor"].astype(str).str.strip()
+        new_df["status"] = "New"
+
     except Exception as e:
         st.error(f"Error reading CSV: {e}")
         st.stop()
@@ -90,32 +110,34 @@ if uploaded_file:
     # 2. Load MASTER data (White / Red)
     if os.path.exists(MASTER_CSV):
         master_df = pd.read_csv(MASTER_CSV)
-        master_df["Timestamp"] = pd.to_datetime(master_df["Timestamp"], errors="coerce")
-        master_df["Sensor_Name"] = master_df["Sensor_Name"].astype(str).str.strip()
-        master_df["Status"] = "Historical"
+        master_df = normalize_columns(master_df)
+
+        master_df["timestamp"] = pd.to_datetime(master_df["timestamp"], errors="coerce")
+        master_df["sensor"] = master_df["sensor"].astype(str).str.strip()
+        master_df["status"] = "Historical"
     else:
-        master_df = pd.DataFrame()
+        master_df = pd.DataFrame(columns=new_df.columns)
 
     # 3. Detect Overlap (Red)
-    if not master_df.empty and not new_df.empty:
-        master_keys = set(zip(master_df["Timestamp"], master_df["Sensor_Name"]))
-        new_keys = set(zip(new_df["Timestamp"], new_df["Sensor_Name"]))
+    if not master_df.empty:
+        master_keys = set(zip(master_df["timestamp"], master_df["sensor"]))
+        new_keys = set(zip(new_df["timestamp"], new_df["sensor"]))
         overlap_keys = master_keys.intersection(new_keys)
 
-        def mark_overlap(row):
-            if (row["Timestamp"], row["Sensor_Name"]) in overlap_keys:
-                return "Overlap"
-            return "Historical"
-
-        master_df["Status"] = master_df.apply(mark_overlap, axis=1)
+        master_df.loc[
+            master_df.apply(
+                lambda r: (r["timestamp"], r["sensor"]) in overlap_keys, axis=1
+            ),
+            "status"
+        ] = "Overlap"
 
     # 4. Merge
     combined_df = pd.concat([master_df, new_df], ignore_index=True)
 
-    # 5. Sort & Deduplicate (KEEP MASTER ON OVERLAP)
-    combined_df = combined_df.sort_values(by="Timestamp")
+    # 5. Sort & Deduplicate (KEEP MASTER ON DUPLICATE)
+    combined_df = combined_df.sort_values(by="timestamp")
     combined_df = combined_df.drop_duplicates(
-        subset=["Timestamp", "Sensor_Name"],
+        subset=["timestamp", "sensor"],
         keep="first"
     )
 
@@ -127,7 +149,7 @@ if uploaded_file:
 
     # 8. Generate Color-Coded Excel
     def highlight_rows(row):
-        status = row["Status"]
+        status = row.get("status", "")
         if status == "New":
             return ["background-color: #90EE90"] * len(row)
         elif status == "Overlap":
@@ -145,15 +167,14 @@ if uploaded_file:
     os.remove(filepath)
 
     st.success("CSV uploaded and master dataset updated!")
-
-    st.subheader("Updated Master Preview")
+    st.subheader("Updated Master Dataset Preview")
     st.dataframe(combined_df.tail(20))
+
+st.divider()
 
 # ---------------------------------
 # Downloads
 # ---------------------------------
-st.divider()
-
 if os.path.exists(MASTER_EXCEL):
     with open(MASTER_EXCEL, "rb") as f:
         st.download_button(
