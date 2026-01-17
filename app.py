@@ -15,9 +15,8 @@ ADC_MAX = 1023
 
 # --- 1. Page Config & CSS ---
 st.set_page_config(
-    page_title="SensorEdge Enterprise", 
+    page_title="SensorEdge", 
     layout="wide", 
-    page_icon="⚡",
     initial_sidebar_state="expanded"
 )
 
@@ -47,7 +46,7 @@ def normalize_sensor_names(name):
 
 @st.cache_data(ttl=60)
 def load_and_clean_master():
-    """Loads data and GUARANTEES all columns exist to prevent KeyErrors."""
+    """Loads data AND performs a deep clean to fix column duplicates."""
     if os.path.exists(MASTER_CSV):
         try:
             df = pd.read_csv(MASTER_CSV)
@@ -56,31 +55,34 @@ def load_and_clean_master():
             df.columns = df.columns.str.strip().str.title()
             rename_map = {'Time': 'Timestamp', 'Date': 'Timestamp', 'Sensor': 'Sensor_Name', 
                           'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 'Adc': 'ADC_Value',
-                          'Adc Value': 'ADC_Value', 'Adc_Value': 'ADC_Value'} # Catch all casing
+                          'Adc Value': 'ADC_Value', 'Adc_Value': 'ADC_Value'}
             df.rename(columns=rename_map, inplace=True)
             
-            # 2. SCHEMA ENFORCER (The Fix for KeyError)
-            required_cols = ['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status']
-            for col in required_cols:
+            # 2. FIX DUPLICATE COLUMNS (The Fix for ValueError)
+            # If renaming created two 'Timestamp' columns, keep only the first one
+            df = df.loc[:, ~df.columns.duplicated()]
+
+            # 3. Schema Enforcement
+            required = ['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status']
+            for col in required:
                 if col not in df.columns:
                     if col == 'Voltage_V': df[col] = 0.0
                     elif col == 'ADC_Value': df[col] = 0
                     elif col == 'Status': df[col] = 'Historical'
                     else: df[col] = None
 
-            # 3. Data Cleaning
+            # 4. Data Cleaning
             if 'Timestamp' in df.columns:
                 df['Timestamp'] = pd.to_datetime(df['Timestamp']).dt.round('1s')
             
             if 'Sensor_Name' in df.columns:
                 df['Sensor_Name'] = df['Sensor_Name'].apply(normalize_sensor_names)
                 
-            # 4. Remove Duplicates
+            # 5. Remove Duplicate Rows
             df = df.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
             
             return df
-        except Exception as e:
-            # If CSV is totally broken, return empty
+        except Exception:
             pass
             
     return pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status'])
@@ -115,6 +117,9 @@ def process_merge_fast(master_df, new_df):
                   'Node': 'Sensor_Name', 'Source': 'Sensor_Name'}
     new_df.rename(columns=rename_map, inplace=True)
     
+    # --- CRITICAL FIX: Remove Duplicate Columns immediately after rename ---
+    new_df = new_df.loc[:, ~new_df.columns.duplicated()]
+
     if 'Timestamp' not in new_df.columns or 'Sensor_Name' not in new_df.columns:
         return None, "❌ Invalid Format: Missing Timestamp or Sensor_Name"
 
@@ -125,7 +130,7 @@ def process_merge_fast(master_df, new_df):
 
     new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
     
-    # 3. Force Column Existence (Fixes Crash)
+    # 3. Force Column Existence
     if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
     if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
     
@@ -148,6 +153,9 @@ def process_merge_fast(master_df, new_df):
     combined = pd.concat([master_df, new_df])
     combined = combined.sort_values('Timestamp')
     
+    # Final Duplicate Column Check before deduplication (Safety)
+    combined = combined.loc[:, ~combined.columns.duplicated()]
+
     before_len = len(combined)
     final = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
     removed = before_len - len(final)
@@ -156,7 +164,6 @@ def process_merge_fast(master_df, new_df):
 
 def get_analytics(df):
     """Safe Analytics Calculation."""
-    # Crash Guard: If columns are missing, return empty dict immediately
     if df.empty or 'Voltage_V' not in df.columns or 'ADC_Value' not in df.columns: 
         return {}
     
@@ -258,7 +265,7 @@ if not master_df.empty:
                     "AI Accuracy": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1)
                 })
         else:
-            st.info("No analytics data available (Columns missing).")
+            st.info("No analytics data available.")
             
     with tab2:
         st.caption(f"Showing top 1,000 rows of {len(master_df):,} for performance. Download full file below.")
