@@ -2,69 +2,71 @@ import streamlit as st
 import pandas as pd
 import os
 
-# ---------------------------------
-# App Config
-# ---------------------------------
-st.set_page_config(page_title="CSV Merge App", layout="centered")
-st.title("Master Dataset Merge (Concat + Remove Duplicates)")
+# -------------------------------------------------
+# App Configuration
+# -------------------------------------------------
+st.set_page_config(page_title="CSV Master Merge", layout="centered")
+st.title("Master Dataset Merge (Concat + De-Duplicate)")
 
 MASTER_FILE = "master_dataset.csv"
 
-# ---------------------------------
+# -------------------------------------------------
 # Load or create master dataset
-# ---------------------------------
+# -------------------------------------------------
 if os.path.exists(MASTER_FILE):
-    master_df = pd.read_csv(MASTER_FILE, parse_dates=["timestamp"])
+    master_df = pd.read_csv(MASTER_FILE, parse_dates=["Timestamp"])
 else:
     master_df = pd.DataFrame(
-        columns=["timestamp", "sensor", "voltage", "adc_value"]
+        columns=["Timestamp", "Sensor_Name", "Value"]
     )
 
-st.write("Current records in master:", len(master_df))
+st.info(f"Current records in master: {len(master_df)}")
 
-# ---------------------------------
+# -------------------------------------------------
 # Upload CSV
-# ---------------------------------
+# -------------------------------------------------
 uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
 
 if uploaded_file is not None:
     try:
-        df = pd.read_csv(uploaded_file, parse_dates=["timestamp"])
+        new_df = pd.read_csv(uploaded_file, parse_dates=["Timestamp"])
 
+        # -----------------------------
         # Validate schema
-        required_cols = {"timestamp", "sensor", "voltage", "adc_value"}
-        if not required_cols.issubset(df.columns):
-            st.error("CSV must contain: timestamp, sensor, voltage, adc_value")
+        # -----------------------------
+        required_cols = {"Timestamp", "Sensor_Name", "Value"}
+        if not required_cols.issubset(new_df.columns):
+            st.error("CSV must contain: Timestamp, Sensor_Name, Value")
         else:
-            st.info(
-                f"Uploaded range: {df['timestamp'].min()} → {df['timestamp'].max()}"
+            new_df["Sensor_Name"] = new_df["Sensor_Name"].astype(str).str.strip()
+
+            st.write(
+                f"Uploaded range: {new_df['Timestamp'].min()} → {new_df['Timestamp'].max()}"
             )
 
             before_count = len(master_df)
 
-            # ---------------------------------
+            # -------------------------------------------------
             # CONCAT master + uploaded
-            # ---------------------------------
+            # -------------------------------------------------
             combined_df = pd.concat(
-                [master_df, df],
+                [master_df, new_df],
                 ignore_index=True
             )
 
-            # ---------------------------------
-            # REMOVE DUPLICATES
-            # (timestamp + sensor)
-            # ---------------------------------
-            combined_df.drop_duplicates(
-                subset=["timestamp", "sensor"],
-                keep="first",
-                inplace=True
+            # -------------------------------------------------
+            # REMOVE DUPLICATES (Uploaded wins)
+            # -------------------------------------------------
+            combined_df = combined_df.drop_duplicates(
+                subset=["Timestamp", "Sensor_Name"],
+                keep="last"   # uploaded CSV wins
             )
 
-            # ---------------------------------
-            # SORT ASCENDING BY DATE
-            # ---------------------------------
+            # -------------------------------------------------
+            # SORT ASCENDING BY TIMESTAMP
+            # -------------------------------------------------
             combined_df.sort_values(
-                by="timestamp",
+                by="Timestamp",
                 ascending=True,
                 inplace=True
             )
@@ -72,14 +74,14 @@ if uploaded_file is not None:
             # Save master
             combined_df.to_csv(MASTER_FILE, index=False)
 
-            added = len(combined_df) - before_count
+            added_or_replaced = len(combined_df) - before_count
 
             st.success("CSV merged successfully")
-            st.write("New records added:", added)
-            st.write("Total records in master:", len(combined_df))
+            st.write("Rows added / replaced:", added_or_replaced)
+            st.write("Total rows in master:", len(combined_df))
 
             st.subheader("Master Dataset Preview")
-            st.dataframe(combined_df.tail(15))
+            st.dataframe(combined_df.tail(20))
 
             # Update in-memory master
             master_df = combined_df
@@ -87,9 +89,9 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Error processing file: {e}")
 
-# ---------------------------------
+# -------------------------------------------------
 # Download master dataset
-# ---------------------------------
+# -------------------------------------------------
 if os.path.exists(MASTER_FILE):
     with open(MASTER_FILE, "rb") as f:
         st.download_button(
