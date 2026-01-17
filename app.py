@@ -5,13 +5,13 @@ import os
 # ---------------------------------
 # App Config
 # ---------------------------------
-st.set_page_config(page_title="Generic CSV Ingestion", layout="centered")
-st.title("Generic Time-Series CSV Ingestion")
+st.set_page_config(page_title="CSV Merge App", layout="centered")
+st.title("Master Dataset Merge (Concat + Remove Duplicates)")
 
 MASTER_FILE = "master_dataset.csv"
 
 # ---------------------------------
-# Load or initialize master dataset
+# Load or create master dataset
 # ---------------------------------
 if os.path.exists(MASTER_FILE):
     master_df = pd.read_csv(MASTER_FILE, parse_dates=["timestamp"])
@@ -20,10 +20,12 @@ else:
         columns=["timestamp", "sensor", "voltage", "adc_value"]
     )
 
+st.write("Current records in master:", len(master_df))
+
 # ---------------------------------
 # Upload CSV
 # ---------------------------------
-uploaded_file = st.file_uploader("Upload CSV (any timestamp range)", type=["csv"])
+uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
 
 if uploaded_file is not None:
     try:
@@ -38,50 +40,49 @@ if uploaded_file is not None:
                 f"Uploaded range: {df['timestamp'].min()} → {df['timestamp'].max()}"
             )
 
-            # ---------------------------------
-            # Build overlap keys
-            # ---------------------------------
-            upload_keys = df["timestamp"].astype(str) + "_" + df["sensor"]
-            master_keys = master_df["timestamp"].astype(str) + "_" + master_df["sensor"]
-
-            # ---------------------------------
-            # REMOVE overlapping records (latest wins)
-            # ---------------------------------
             before_count = len(master_df)
 
-            master_df = master_df[
-                ~master_keys.isin(upload_keys)
-            ]
-
-            removed = before_count - len(master_df)
-
             # ---------------------------------
-            # Append new data
+            # CONCAT master + uploaded
             # ---------------------------------
-            master_df = pd.concat([master_df, df], ignore_index=True)
+            combined_df = pd.concat(
+                [master_df, df],
+                ignore_index=True
+            )
 
             # ---------------------------------
-            # Sort ascending by timestamp
+            # REMOVE DUPLICATES
+            # (timestamp + sensor)
             # ---------------------------------
-            master_df.sort_values(
+            combined_df.drop_duplicates(
+                subset=["timestamp", "sensor"],
+                keep="first",
+                inplace=True
+            )
+
+            # ---------------------------------
+            # SORT ASCENDING BY DATE
+            # ---------------------------------
+            combined_df.sort_values(
                 by="timestamp",
                 ascending=True,
                 inplace=True
             )
 
             # Save master
-            master_df.to_csv(MASTER_FILE, index=False)
+            combined_df.to_csv(MASTER_FILE, index=False)
 
-            # ---------------------------------
-            # Output summary
-            # ---------------------------------
+            added = len(combined_df) - before_count
+
             st.success("CSV merged successfully")
-            st.write(f"Overlapping records replaced: {removed}")
-            st.write(f"New records added: {len(df)}")
-            st.write(f"Total records in master: {len(master_df)}")
+            st.write("New records added:", added)
+            st.write("Total records in master:", len(combined_df))
 
-            st.subheader("Master Dataset (Latest Records)")
-            st.dataframe(master_df.tail(20))
+            st.subheader("Master Dataset Preview")
+            st.dataframe(combined_df.tail(15))
+
+            # Update in-memory master
+            master_df = combined_df
 
     except Exception as e:
         st.error(f"Error processing file: {e}")
@@ -92,7 +93,7 @@ if uploaded_file is not None:
 if os.path.exists(MASTER_FILE):
     with open(MASTER_FILE, "rb") as f:
         st.download_button(
-            "Download Master Dataset",
+            label="Download Master Dataset",
             data=f,
             file_name="master_dataset.csv",
             mime="text/csv"
