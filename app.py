@@ -49,9 +49,9 @@ def load_master():
 def standardize_columns(df):
     """
     Smartly renames columns. 
-    Now includes 'node', 'id', 't' to catch your specific file format.
+    Includes 'node', 'id', 't' to catch your specific file format.
     """
-    df.columns = df.columns.str.strip().str.lower() # Lowercase for easier matching
+    df.columns = df.columns.str.strip().str.lower() 
     
     col_map = {
         # Time variations
@@ -65,7 +65,6 @@ def standardize_columns(df):
         'adc': 'ADC_Value', 'adc_value': 'ADC_Value'
     }
     
-    # Rename columns based on map
     df.rename(columns=col_map, inplace=True)
     
     # Capitalize standard columns for display
@@ -134,7 +133,7 @@ with st.sidebar:
             # 1. Standardize Names
             new_df = standardize_columns(new_df)
             
-            # 2. DIAGNOSTIC CHECK (Shows you exactly what is wrong)
+            # 2. Validation
             required = ['Timestamp', 'Sensor_Name']
             missing = [c for c in required if c not in new_df.columns]
             
@@ -142,7 +141,6 @@ with st.sidebar:
                 st.error("❌ File Format Error")
                 st.write("**Missing Columns:**", missing)
                 st.write("**Found Columns:**", list(new_df.columns))
-                st.info("Tip: The app accepted 'node', 'id', 't' as valid, but couldn't find a match. Please rename columns in your CSV.")
             else:
                 with st.spinner("Merging..."):
                     new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp'], errors='coerce')
@@ -179,8 +177,13 @@ with st.sidebar:
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
     st.title("SensorEdge Analytics")
+
+# --- FIX APPLIED HERE: Clean IF/ELSE Block ---
 with col_h2:
-    st.success(f"● {analytics['status']}") if analytics['status'] == "System Healthy" else st.warning(f"● {analytics['status']}")
+    if analytics['status'] == "System Healthy":
+        st.success(f"● {analytics['status']}")
+    else:
+        st.warning(f"● {analytics['status']}")
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 kpi1.metric("Total Records", f"{len(master_df):,}")
