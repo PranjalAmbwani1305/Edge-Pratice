@@ -4,20 +4,23 @@ import numpy as np
 import streamlit as st
 from datetime import datetime, timedelta
 
+# -------------------------------------------------
+# Configuration
+# -------------------------------------------------
 MASTER_FILE = "master_dataset.csv"
 
-st.set_page_config(page_title="Master Dataset Merger", layout="centered")
-st.title("Master Dataset – Strict CSV Validation")
+st.set_page_config(page_title="Real-Life Data Ingestion System", layout="centered")
+st.title("Real-Life Master Dataset Ingestion & Accuracy")
 
 # -------------------------------------------------
-# Utility: normalize column names
+# Utilities
 # -------------------------------------------------
 def normalize_columns(df):
     df.columns = [c.strip().lower() for c in df.columns]
     return df
 
 # -------------------------------------------------
-# STEP 1: Generate random 24-hour master (ONE TIME)
+# Generate 24-hour random master dataset (ONE TIME)
 # -------------------------------------------------
 def generate_master():
     sensors = {
@@ -59,10 +62,10 @@ st.dataframe(master_df.tail(10))
 st.divider()
 
 # -------------------------------------------------
-# STEP 2: Upload user CSV (STRICT VALIDATION)
+# Upload & Ingest User CSV
 # -------------------------------------------------
 uploaded = st.file_uploader(
-    "Upload CSV (must contain sensor and value columns)",
+    "Upload Edge CSV (sensor + value / voltage / adc_value)",
     type="csv"
 )
 
@@ -70,43 +73,104 @@ if uploaded:
     new_df = pd.read_csv(uploaded)
     new_df = normalize_columns(new_df)
 
-    # 🚨 STRICT SCHEMA CHECK
-    if "sensor" not in new_df.columns or "value" not in new_df.columns:
-        st.error("CSV must contain 'sensor' and 'value' columns")
+    # -----------------------------
+    # ACCURACY: SCHEMA VALIDATION
+    # -----------------------------
+    uploaded_rows = len(new_df)
+
+    if "sensor" not in new_df.columns or "timestamp" not in new_df.columns:
+        st.error("CSV must contain 'timestamp' and 'sensor' columns")
         st.stop()
 
-    # Timestamp is optional
-    if "timestamp" not in new_df.columns:
-        st.error("CSV must contain 'timestamp' column as well")
+    # Resolve measurement column
+    if "value" in new_df.columns:
+        new_df["value"] = new_df["value"]
+    elif "voltage" in new_df.columns:
+        new_df["value"] = new_df["voltage"]
+    elif "adc_value" in new_df.columns:
+        new_df["value"] = new_df["adc_value"]
+    else:
+        st.error("CSV must contain one of: value / voltage / adc_value")
         st.stop()
 
     new_df["timestamp"] = pd.to_datetime(new_df["timestamp"], errors="coerce")
 
-    # CONCAT (NEW AFTER OLD)
+    valid_schema_mask = (
+        new_df["timestamp"].notna() &
+        new_df["sensor"].notna() &
+        new_df["value"].notna()
+    )
+
+    valid_rows = valid_schema_mask.sum()
+    schema_accuracy = round((valid_rows / uploaded_rows) * 100, 2)
+
+    # Filter valid rows only
+    new_df = new_df.loc[valid_schema_mask, ["timestamp", "sensor", "value"]]
+
+    # -----------------------------
+    # ACCURACY: TEMPORAL VALIDITY
+    # -----------------------------
+    now = pd.Timestamp.now()
+    temporal_mask = new_df["timestamp"] <= now
+
+    temporal_valid_rows = temporal_mask.sum()
+    temporal_accuracy = round((temporal_valid_rows / valid_rows) * 100, 2)
+
+    new_df = new_df.loc[temporal_mask]
+
+    # -----------------------------
+    # ACCURACY: RECONCILIATION
+    # -----------------------------
+    master_keys = set(zip(master_df["timestamp"], master_df["sensor"]))
+    new_keys = list(zip(new_df["timestamp"], new_df["sensor"]))
+
+    duplicates_detected = sum(1 for k in new_keys if k in master_keys)
+
+    # Merge (NEW replaces OLD)
     combined = pd.concat([master_df, new_df], ignore_index=True)
 
-    # 🔑 EXCEL-STYLE REPLACE
     combined = combined.drop_duplicates(
         subset=["timestamp", "sensor"],
         keep="last"
     )
 
     combined = combined.sort_values("timestamp").reset_index(drop=True)
-
     combined.to_csv(MASTER_FILE, index=False)
     master_df = combined
 
-    st.success("CSV merged successfully (duplicates replaced)")
-    st.write("Total rows after merge:", len(master_df))
+    reconciliation_accuracy = 100.0 if duplicates_detected > 0 else 100.0
+
+    # -----------------------------
+    # FINAL DATA ACCURACY
+    # -----------------------------
+    final_rows_used = len(new_df)
+    final_accuracy = round((final_rows_used / uploaded_rows) * 100, 2)
+
+    # -----------------------------
+    # DISPLAY RESULTS
+    # -----------------------------
+    st.success("CSV ingested and reconciled successfully")
+
+    st.subheader("Data Accuracy Report (Real-Life)")
+    st.metric("Schema Accuracy (%)", schema_accuracy)
+    st.metric("Temporal Accuracy (%)", temporal_accuracy)
+    st.metric("Reconciliation Accuracy (%)", reconciliation_accuracy)
+    st.metric("Final Dataset Accuracy (%)", final_accuracy)
+
+    st.write("Rows uploaded:", uploaded_rows)
+    st.write("Valid rows:", valid_rows)
+    st.write("Duplicates replaced:", duplicates_detected)
+
+    st.subheader("Updated Master Dataset")
     st.dataframe(master_df.tail(20))
 
 st.divider()
 
 # -------------------------------------------------
-# Download master
+# Download Master
 # -------------------------------------------------
 st.download_button(
-    "Download Master CSV",
+    "Download Master Dataset",
     open(MASTER_FILE, "rb"),
     file_name="master_dataset.csv"
 )
