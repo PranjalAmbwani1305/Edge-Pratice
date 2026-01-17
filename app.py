@@ -9,15 +9,14 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report
 
 # --- Configuration ---
-MASTER_CSV = 'master_edge_sensor_data.csv'  # Matches your notebook filename
+MASTER_CSV = 'master_edge_sensor_data.csv'
 V_REF = 5.0        
 ADC_MAX = 1023     
 
 # --- 1. Page Config ---
 st.set_page_config(
-    page_title="SensorEdge Enterprise", 
+    page_title="SensorEdge", 
     layout="wide", 
-    page_icon="⚡",
     initial_sidebar_state="expanded"
 )
 
@@ -101,8 +100,15 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
     # Normalize
     new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp']).dt.round('1s')
     new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
-    for col in ['Voltage_V', 'ADC_Value']:
-        if col not in new_df.columns: new_df[col] = 0
+    
+    # Auto-Fix Missing or Bad Numbers
+    if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
+    if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
+    
+    # Convert to numeric, forcing errors to NaN, then filling with 0
+    new_df['Voltage_V'] = pd.to_numeric(new_df['Voltage_V'], errors='coerce').fillna(0.0)
+    new_df['ADC_Value'] = pd.to_numeric(new_df['ADC_Value'], errors='coerce').fillna(0).astype(int)
+    
     new_df['Status'] = 'New'
 
     # 2. Logic: Identify Overlaps (Visuals only)
@@ -144,14 +150,34 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
 def get_analytics(df):
     if df.empty or 'Voltage_V' not in df.columns: return {}
     results = {}
-    for sensor, sub in df.groupby('Sensor_Name'):
+    
+    # --- CRITICAL FIX FOR IntCastingNaNError ---
+    # Ensure all data is numeric and non-empty before processing
+    
+    for sensor, sub_raw in df.groupby('Sensor_Name'):
+        # Work on a copy to avoid SettingWithCopy warnings
+        sub = sub_raw.copy()
+        
+        # 1. Force Voltage to Float, replace errors/NaNs with 0.0
+        sub['Voltage_V'] = pd.to_numeric(sub['Voltage_V'], errors='coerce').fillna(0.0)
+        
+        # 2. Force ADC to Numeric, replace errors/NaNs with 0
+        sub['ADC_Value'] = pd.to_numeric(sub['ADC_Value'], errors='coerce').fillna(0)
+        
+        # 3. Calculate
         if len(sub) > 0:
             exp = (sub['Voltage_V'] / V_REF * ADC_MAX).astype(int)
             hw = (np.abs(sub['ADC_Value'] - exp) <= 1).mean() * 100
-        else: hw = 0.0
+        else:
+            hw = 0.0
+            
         results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
     
-    clean = df.dropna(subset=['Voltage_V', 'Sensor_Name'])
+    # AI Check
+    # Filter for valid rows only for the AI model
+    clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
+    clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
+    
     if clean['Sensor_Name'].nunique() >= 2:
         try:
             s_df = clean.sample(min(1000, len(clean)), random_state=42)
@@ -169,6 +195,11 @@ if 'master_df' not in st.session_state:
         try:
             st.session_state.master_df = pd.read_csv(MASTER_CSV)
             st.session_state.master_df['Timestamp'] = pd.to_datetime(st.session_state.master_df['Timestamp'])
+            
+            # Initial Cleanup on Load
+            st.session_state.master_df['Voltage_V'] = pd.to_numeric(st.session_state.master_df['Voltage_V'], errors='coerce').fillna(0.0)
+            st.session_state.master_df['ADC_Value'] = pd.to_numeric(st.session_state.master_df['ADC_Value'], errors='coerce').fillna(0).astype(int)
+            
         except:
             st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
     else:
@@ -178,14 +209,15 @@ master_df = st.session_state.master_df
 
 # Sidebar
 with st.sidebar:
-    st.title("⚡ Control Panel")
+    st.title("Control Panel")
     st.markdown("---")
     
     st.subheader("1. Initialize (Notebook Logic)")
-    start_date = st.date_input("Simulation Date", value=date(2026, 1, 17))
     
     if st.button("Generate & Reset"):
         with st.spinner("Generating..."):
+            # Use current date as default
+            start_date = datetime.now().date()
             new_data = generate_full_dataset(start_date)
             new_data.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = new_data
@@ -204,17 +236,16 @@ with st.sidebar:
             final_df.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = final_df
             st.success("Script Finished")
-            # Show the EXACT console output you asked for
             st.code(log_msg)
 
     st.markdown("---")
-    if st.button("⚠️ Factory Reset"):
+    if st.button("Factory Reset"):
         if os.path.exists(MASTER_CSV): os.remove(MASTER_CSV)
         st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
         st.rerun()
 
 # Dashboard
-st.title("SensorEdge Pro ⚡")
+st.title("SensorEdge")
 
 if not master_df.empty:
     k1, k2, k3, k4 = st.columns(4)
@@ -230,7 +261,7 @@ if not master_df.empty:
     
     st.divider()
     
-    tab1, tab2 = st.tabs(["🎯 Accuracy Matrix", "🔍 Data Inspector"])
+    tab1, tab2 = st.tabs(["Accuracy Matrix", "Data Inspector"])
     
     with tab1:
         if analytics:
@@ -257,6 +288,6 @@ if not master_df.empty:
         except:
             st.dataframe(view, use_container_width=True)
             
-        st.download_button("📥 Download Master CSV", master_df.to_csv(index=False).encode('utf-8'), MASTER_CSV, "text/csv")
+        st.download_button("Download Master CSV", master_df.to_csv(index=False).encode('utf-8'), MASTER_CSV, "text/csv")
 else:
     st.info("System Offline. Use sidebar to Initialize Data.")
