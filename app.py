@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, date
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 
 # --- Configuration ---
 MASTER_CSV = 'master_edge_sensor_data.csv'
@@ -89,10 +89,6 @@ def normalize_sensor_names(name):
     return n.title()
 
 def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
-    log_buffer = []
-    log_buffer.append(f"Loading Master: {MASTER_CSV}...")
-    log_buffer.append(f"Loading New Data: {filename}...")
-    
     # 1. Prepare New Data
     new_df.columns = new_df.columns.str.strip().str.title()
     rename_map = {
@@ -123,32 +119,13 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
         master_df.loc[m_idx.isin(n_idx), 'Status'] = 'Overlap'
 
     # 3. Notebook Merge Logic
-    log_buffer.append("Merging datasets...")
-    
-    old_count = len(master_df)
-    new_records_count = len(new_df)
-    
     combined = pd.concat([master_df, new_df])
     
     # keep='first' logic
     final_df = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
     final_df = final_df.sort_values(by='Timestamp').reset_index(drop=True)
     
-    final_count = len(final_df)
-    added_count = final_count - old_count
-    ignored_count = new_records_count - added_count
-    
-    # 4. Generate EXACT Log Output
-    log_buffer.append("-" * 40)
-    log_buffer.append("UPDATE SUCCESSFUL")
-    log_buffer.append("-" * 40)
-    log_buffer.append(f"Previous Master Size : {old_count}")
-    log_buffer.append(f"New File Size        : {new_records_count}")
-    log_buffer.append(f"Actually Added       : {added_count}")
-    log_buffer.append(f"Duplicates Ignored   : {ignored_count}")
-    log_buffer.append(f"New Master Size      : {final_count}")
-    
-    return final_df, "\n".join(log_buffer)
+    return final_df
 
 # --- 4. Logic: Compression ---
 def analyze_compression(df):
@@ -200,14 +177,10 @@ def analyze_compression(df):
 
 # --- 5. Logic: Error Detection ---
 def check_system_health(df):
-    """Scans for range violations and stuck values."""
     alerts = []
-    
     for sensor, sub in df.groupby('Sensor_Name'):
-        # 1. Range Check
         v_min, v_max = SAFE_LIMITS.get(sensor, (0, 5))
         
-        # High Violations
         high_mask = sub['Voltage_V'] > v_max
         if high_mask.any():
             count = high_mask.sum()
@@ -219,7 +192,6 @@ def check_system_health(df):
                 "Status": "Over Limit"
             })
             
-        # Low Violations
         low_mask = sub['Voltage_V'] < v_min
         if low_mask.any():
             count = low_mask.sum()
@@ -231,17 +203,44 @@ def check_system_health(df):
                 "Status": "Under Limit"
             })
             
-        # 2. Freeze Check
         if len(sub) > 100 and sub['Voltage_V'].std() < 0.01:
              alerts.append({
                 "Severity": "Critical",
                 "Sensor": sensor,
-                "Issue": "Sensor Frozen (No Variation)",
+                "Issue": "Sensor Frozen",
                 "Count": "All",
                 "Status": "Stuck"
             })
-
     return pd.DataFrame(alerts)
+
+# --- 6. Logic: AI Analysis (Random Forest) ---
+def train_ai_model(df):
+    clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
+    clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
+    
+    if len(clean) < 10 or clean['Sensor_Name'].nunique() < 2:
+        return None, None, "Insufficient data to train model."
+    
+    # Features & Target
+    X = clean[['Voltage_V']]
+    y = clean['Sensor_Name']
+    
+    # Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+    
+    # Train Random Forest
+    clf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
+    clf.fit(X_train, y_train)
+    
+    # Evaluate
+    y_pred = clf.predict(X_test)
+    acc = clf.score(X_test, y_test) * 100
+    
+    # Confusion Matrix Report
+    cm = confusion_matrix(y_test, y_pred, labels=clf.classes_)
+    cm_df = pd.DataFrame(cm, index=clf.classes_, columns=clf.classes_)
+    
+    return clf, cm_df, acc
 
 def get_analytics(df):
     if df.empty or 'Voltage_V' not in df.columns: return {}
@@ -260,6 +259,7 @@ def get_analytics(df):
             
         results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
     
+    # Quick AI Check (Simplified)
     clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
     clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
     
@@ -273,9 +273,8 @@ def get_analytics(df):
         except: pass
     return results
 
-# --- 6. Main App ---
+# --- 7. Main App ---
 
-# Initialize State
 if 'master_df' not in st.session_state:
     if os.path.exists(MASTER_CSV):
         try:
@@ -287,9 +286,6 @@ if 'master_df' not in st.session_state:
             st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
     else:
         st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
-
-if 'merge_log' not in st.session_state:
-    st.session_state.merge_log = None
 
 master_df = st.session_state.master_df
 
@@ -305,7 +301,6 @@ with st.sidebar:
             new_data = generate_full_dataset(start_date)
             new_data.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = new_data
-            st.session_state.merge_log = None
             time.sleep(0.5)
             st.rerun()
 
@@ -316,30 +311,21 @@ with st.sidebar:
     if uploaded:
         if st.button("Run Merge Script"):
             new_raw = pd.read_csv(uploaded)
-            final_df, log_msg = merge_logic_exact(master_df, new_raw, uploaded.name)
+            final_df = merge_logic_exact(master_df, new_raw, uploaded.name)
             
             final_df.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = final_df
-            st.session_state.merge_log = log_msg
+            st.toast("Merge Complete", icon="✅")
             st.rerun()
 
     st.markdown("---")
     if st.button("Factory Reset"):
         if os.path.exists(MASTER_CSV): os.remove(MASTER_CSV)
         st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
-        st.session_state.merge_log = None
         st.rerun()
 
 # --- Main Dashboard ---
 st.title("SensorEdge")
-
-if st.session_state.merge_log:
-    st.success("Merge Completed Successfully")
-    st.code(st.session_state.merge_log, language="text")
-    if st.button("Clear Log"):
-        st.session_state.merge_log = None
-        st.rerun()
-    st.divider()
 
 if not master_df.empty:
     k1, k2, k3, k4 = st.columns(4)
@@ -356,7 +342,7 @@ if not master_df.empty:
     st.divider()
     
     # NAVIGATION TABS
-    tab1, tab2, tab3, tab4 = st.tabs(["Accuracy Matrix", "Data Inspector", "System Health", "Compression Lab"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Accuracy Matrix", "Data Inspector", "System Health", "Compression Lab", "AI Intelligence"])
     
     with tab1:
         if analytics:
@@ -385,7 +371,7 @@ if not master_df.empty:
             
         st.download_button("Download Master CSV", master_df.to_csv(index=False).encode('utf-8'), MASTER_CSV, "text/csv")
         
-    with tab3: # SYSTEM HEALTH
+    with tab3:
         st.markdown("### Anomaly Detection Logic")
         
         health_df = check_system_health(master_df)
@@ -412,9 +398,9 @@ if not master_df.empty:
             * **Light:** 0.0V - 5.0V
             """)
 
-    with tab4: # COMPRESSION LAB
+    with tab4:
         st.markdown("### Frame Difference Compression Analysis")
-        st.info("This tool calculates data savings by storing the **difference** between readings (Delta) instead of the full value.")
+        st.info("Calculates data savings by storing the **difference** (Delta) instead of full values.")
         
         if st.button("Run Compression Analysis"):
             with st.spinner("Compressing data..."):
@@ -427,6 +413,35 @@ if not master_df.empty:
                 m4.metric("Method", "Delta Encoding")
                 
                 st.dataframe(comp_df, use_container_width=True)
+
+    with tab5:
+        st.markdown("### 🤖 Random Forest Classifier")
+        st.caption("Trains a Machine Learning model to distinguish Sensor Types based on Voltage readings.")
+        
+        if st.button("Train & Evaluate Model"):
+            with st.spinner("Training Random Forest..."):
+                model, cm, acc = train_ai_model(master_df)
                 
+                if model:
+                    st.success(f"Model Trained! Test Accuracy: **{acc:.2f}%**")
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("#### Confusion Matrix")
+                        st.write("Shows how often the model correctly identified each sensor.")
+                        st.dataframe(cm, use_container_width=True)
+                    
+                    with c2:
+                        st.markdown("#### Live Predictor")
+                        st.write("Test the model with manual input:")
+                        
+                        test_volts = st.slider("Input Voltage (V)", 0.0, 5.0, 2.5)
+                        prediction = model.predict([[test_volts]])[0]
+                        probs = model.predict_proba([[test_volts]])[0]
+                        
+                        st.markdown(f"### Prediction: **{prediction}**")
+                        # Display probability bars
+                        st.bar_chart(pd.DataFrame(probs, index=model.classes_, columns=["Probability"]))
+                        
 else:
     st.info("System Offline. Use sidebar to Initialize Data.")
