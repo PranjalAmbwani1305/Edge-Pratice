@@ -38,18 +38,10 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     h1, h2, h3 { font-family: 'Segoe UI', sans-serif; color: #2c3e50; }
-    .error-box {
-        background-color: #ffebee;
-        color: #c62828;
-        padding: 10px;
-        border-radius: 5px;
-        border: 1px solid #ef9a9a;
-        margin-bottom: 10px;
-    }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. Logic: Generation (from sensor_database.ipynb) ---
+# --- 2. Logic: Generation ---
 def generate_sensor_data(sensor_name, interval_seconds, v_min, v_max, duration_hours, start_time):
     total_seconds = duration_hours * 3600
     timestamps = [start_time + timedelta(seconds=i) for i in range(0, total_seconds, interval_seconds)]
@@ -80,7 +72,7 @@ def generate_full_dataset(start_date_obj):
     full_df = full_df.sort_values(by="Timestamp").reset_index(drop=True)
     return full_df
 
-# --- 3. Logic: Merge (from Update_Master.ipynb) ---
+# --- 3. Logic: Merge (Strict User Logic) ---
 def normalize_sensor_names(name):
     n = str(name).strip().lower()
     if 'temp' in n or 'node_1' in n: return 'Temperature'
@@ -90,12 +82,10 @@ def normalize_sensor_names(name):
 
 def merge_logic_exact(master_df, new_df):
     """
-    Implements exact logic from Update_Master.ipynb
-    1. Load & Concat
-    2. Drop Duplicates (subset=Timestamp+Sensor, keep='first')
-    3. Sort
+    Implements the exact logic from your script:
+    Concat -> Drop Duplicates (keep='first') -> Sort
     """
-    # 1. Prepare New Data (Standardization)
+    # 1. Clean Incoming Data
     new_df.columns = new_df.columns.str.strip().str.title()
     rename_map = {
         'Time': 'Timestamp', 'Date': 'Timestamp', 
@@ -106,18 +96,18 @@ def merge_logic_exact(master_df, new_df):
     new_df.rename(columns=rename_map, inplace=True)
     new_df = new_df.loc[:, ~new_df.columns.duplicated()]
 
-    # Format Timestamps (Round to 1s to ensure matching works)
+    # Format
     new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp']).dt.round('1s')
     new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
     
-    # Ensure numeric columns (Crash Prevention)
+    # Validation/Fill
     if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
     if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
     new_df['Voltage_V'] = pd.to_numeric(new_df['Voltage_V'], errors='coerce').fillna(0.0)
     new_df['ADC_Value'] = pd.to_numeric(new_df['ADC_Value'], errors='coerce').fillna(0).astype(int)
     new_df['Status'] = 'New'
 
-    # 2. Mark Overlaps (For UI visualization only)
+    # 2. Logic: Mark Overlaps (Visual Aid Only)
     if not master_df.empty:
         master_df['Timestamp'] = pd.to_datetime(master_df['Timestamp']).dt.round('1s')
         master_df['Status'] = 'Historical'
@@ -125,21 +115,27 @@ def merge_logic_exact(master_df, new_df):
         n_idx = new_df.set_index(['Timestamp', 'Sensor_Name']).index
         master_df.loc[m_idx.isin(n_idx), 'Status'] = 'Overlap'
 
-    # 3. MERGE STRATEGY
-    # "Concatenate (Stack) the dataframes"
+    # 3. CORE LOGIC (User Provided)
     combined = pd.concat([master_df, new_df])
     
-    # "Remove Duplicates"
     # "keep='first' means: If the Master already has a record for this Time+Sensor,
     # keep the Master's version and ignore the new file's version."
     final_df = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
     
-    # "Sort by Timestamp"
     final_df = final_df.sort_values(by='Timestamp').reset_index(drop=True)
     
-    return final_df
+    # Calculate Stats for Notification
+    stats = {
+        "old": len(master_df),
+        "new_file": len(new_df),
+        "final": len(final_df),
+        "added": len(final_df) - len(master_df)
+    }
+    stats["ignored"] = stats["new_file"] - stats["added"]
+    
+    return final_df, stats
 
-# --- 4. Logic: Compression ---
+# --- 4. Logic: Compression (Task 1) ---
 def analyze_compression(df):
     results = []
     total_raw_bytes = 0
@@ -187,7 +183,7 @@ def analyze_compression(df):
     
     return pd.DataFrame(results), summary
 
-# --- 5. Logic: Error Detection ---
+# --- 5. Logic: Error Detection (Task 2) ---
 def check_system_health(df):
     alerts = []
     for sensor, sub in df.groupby('Sensor_Name'):
@@ -225,36 +221,12 @@ def check_system_health(df):
             })
     return pd.DataFrame(alerts)
 
-# --- 6. Logic: AI Analysis ---
-def train_ai_model(df):
-    # Prepare Data
-    clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
-    clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
-    
-    if len(clean) < 10 or clean['Sensor_Name'].nunique() < 2:
-        return None, None, "Insufficient data to train model."
-    
-    X = clean[['Voltage_V']]
-    y = clean['Sensor_Name']
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-    
-    # Random Forest
-    clf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
-    clf.fit(X_train, y_train)
-    
-    acc = clf.score(X_test, y_test) * 100
-    
-    y_pred = clf.predict(X_test)
-    cm = confusion_matrix(y_test, y_pred, labels=clf.classes_)
-    cm_df = pd.DataFrame(cm, index=clf.classes_, columns=clf.classes_)
-    
-    return clf, cm_df, acc
-
+# --- 6. Logic: Accuracy & Analytics ---
 def get_analytics(df):
     if df.empty or 'Voltage_V' not in df.columns: return {}
     results = {}
     
+    # Hardware Fidelity
     for sensor, sub_raw in df.groupby('Sensor_Name'):
         sub = sub_raw.copy()
         sub['Voltage_V'] = pd.to_numeric(sub['Voltage_V'], errors='coerce').fillna(0.0)
@@ -265,20 +237,29 @@ def get_analytics(df):
             hw = (np.abs(sub['ADC_Value'] - exp) <= 1).mean() * 100
         else:
             hw = 0.0
-            
         results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
     
+    # AI Accuracy (Random Forest)
     clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
     clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
     
     if clean['Sensor_Name'].nunique() >= 2:
         try:
-            s_df = clean.sample(min(1000, len(clean)), random_state=42)
-            clf = RandomForestClassifier(n_estimators=10, max_depth=5).fit(s_df[['Voltage_V']], s_df['Sensor_Name'])
-            report = classification_report(s_df['Sensor_Name'], clf.predict(s_df[['Voltage_V']]), output_dict=True, zero_division=0)
+            X = clean[['Voltage_V']]
+            y = clean['Sensor_Name']
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+            
+            clf = RandomForestClassifier(n_estimators=10, max_depth=5, random_state=42)
+            clf.fit(X_train, y_train)
+            
+            y_pred = clf.predict(X_test)
+            report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+            
             for s in results:
-                if s in report: results[s]['ai'] = report[s]['recall'] * 100
+                if s in report: 
+                    results[s]['ai'] = report[s]['f1-score'] * 100
         except: pass
+        
     return results
 
 # --- 7. Main App ---
@@ -319,11 +300,16 @@ with st.sidebar:
     if uploaded:
         if st.button("Run Merge Script"):
             new_raw = pd.read_csv(uploaded)
-            final_df = merge_logic_exact(master_df, new_raw)
+            final_df, stats = merge_logic_exact(master_df, new_raw)
             
             final_df.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = final_df
-            st.toast("Merge Complete", icon="✅")
+            
+            # Show Success & Stats cleanly (No raw log)
+            msg = f"Merge Complete! Added: {stats['added']} | Ignored: {stats['ignored']}"
+            st.toast(msg, icon="✅")
+            st.success(msg)
+            time.sleep(1)
             st.rerun()
 
     st.markdown("---")
@@ -344,13 +330,13 @@ if not master_df.empty:
     
     k1.metric("Total Records", f"{len(master_df):,}")
     k2.metric("Active Sensors", master_df['Sensor_Name'].nunique())
-    k3.metric("Hardware Fidelity", f"{avg_hw:.1f}%")
-    k4.metric("AI Confidence", f"{avg_ai:.1f}%")
+    k3.metric("Hardware Accuracy", f"{avg_hw:.1f}%")
+    k4.metric("AI Accuracy", f"{avg_ai:.1f}%")
     
     st.divider()
     
-    # NAVIGATION TABS
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Accuracy Matrix", "Data Inspector", "System Health", "Compression Lab", "AI Intelligence"])
+    # FINAL TABS: Accuracy, Data Inspector, System Health, Compression Lab
+    tab1, tab2, tab3, tab4 = st.tabs(["Accuracy Matrix", "Data Inspector", "System Health", "Compression Lab"])
     
     with tab1:
         if analytics:
@@ -379,7 +365,7 @@ if not master_df.empty:
             
         st.download_button("Download Master CSV", master_df.to_csv(index=False).encode('utf-8'), MASTER_CSV, "text/csv")
         
-    with tab3:
+    with tab3: # System Health (Task 2)
         st.markdown("### Anomaly Detection Logic")
         health_df = check_system_health(master_df)
         
@@ -397,7 +383,7 @@ if not master_df.empty:
             * **Light:** 0.0V - 5.0V
             """)
 
-    with tab4:
+    with tab4: # Compression Lab (Task 1)
         st.markdown("### Frame Difference Compression Analysis")
         st.info("Calculates data savings by storing the **difference** (Delta) instead of full values.")
         
@@ -412,26 +398,6 @@ if not master_df.empty:
                 m4.metric("Method", "Delta Encoding")
                 
                 st.dataframe(comp_df, use_container_width=True)
-
-    with tab5:
-        st.markdown("### Random Forest Classifier")
-        st.caption("Trains a Machine Learning model to distinguish Sensor Types based on Voltage readings.")
-        
-        if st.button("Train & Evaluate Model"):
-            with st.spinner("Training Random Forest..."):
-                model, cm, acc = train_ai_model(master_df)
-                
-                if model:
-                    st.success(f"Model Trained! Test Accuracy: **{acc:.2f}%**")
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown("#### Confusion Matrix")
-                        st.dataframe(cm, use_container_width=True)
-                    with c2:
-                        st.markdown("#### Live Predictor")
-                        test_volts = st.slider("Input Voltage (V)", 0.0, 5.0, 2.5)
-                        prediction = model.predict([[test_volts]])[0]
-                        st.markdown(f"### Prediction: **{prediction}**")
                         
 else:
     st.info("System Offline. Use sidebar to Initialize Data.")
