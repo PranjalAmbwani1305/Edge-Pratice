@@ -283,8 +283,30 @@ with st.sidebar:
     st.title("Control Panel")
     st.markdown("---")
     
-    st.subheader("1. Initialize")
-    if st.button("Generate & Reset"):
+    # --- UPDATED SECTION: INITIALIZE OR UPLOAD ---
+    st.subheader("1. Initialize Master Data")
+    
+    # Option A: Upload Master
+    master_upload = st.file_uploader("Upload Existing Master CSV (Optional)", type=['csv'], key="master_uploader")
+    if master_upload:
+        if st.button("Load Master from File"):
+            try:
+                loaded_df = pd.read_csv(master_upload)
+                # Ensure basic columns exist
+                if 'Timestamp' in loaded_df.columns and 'Sensor_Name' in loaded_df.columns:
+                    loaded_df.to_csv(MASTER_CSV, index=False)
+                    st.session_state.master_df = loaded_df
+                    st.success("Master File Loaded Successfully!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("Invalid CSV: Must contain 'Timestamp' and 'Sensor_Name'")
+            except Exception as e:
+                st.error(f"Error loading file: {e}")
+
+    # Option B: Generate Random
+    st.write("OR")
+    if st.button("Generate Random Master & Reset"):
         with st.spinner("Generating..."):
             start_date = datetime.now().date()
             new_data = generate_full_dataset(start_date)
@@ -294,8 +316,8 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    st.subheader("2. Merge")
-    uploaded = st.file_uploader("Upload CSV", type=['csv'])
+    st.subheader("2. Merge New Data")
+    uploaded = st.file_uploader("Upload Sensor Data CSV", type=['csv'])
     
     if uploaded:
         if st.button("Run Merge Script"):
@@ -331,11 +353,11 @@ if not master_df.empty:
     k1.metric("Total Records", f"{len(master_df):,}")
     k2.metric("Active Sensors", master_df['Sensor_Name'].nunique())
     k3.metric("Hardware Accuracy", f"{avg_hw:.1f}%")
-    k4.metric(" Accuracy", f"{avg_ai:.1f}%")
+    k4.metric("AI Accuracy", f"{avg_ai:.1f}%")
     
     st.divider()
     
-    # FINAL TABS: Accuracy, Data Inspector, System Health, Compression Lab
+    # FINAL TABS
     tab1, tab2, tab3, tab4 = st.tabs(["Rows Value/Counts", "Data Inspector", "System Requirements", "Compression Lab"])
     
     with tab1:
@@ -363,9 +385,10 @@ if not master_df.empty:
         except:
             st.dataframe(view, use_container_width=True)
             
-        st.download_button("Download  CSV", master_df.to_csv(index=False).encode('utf-8'), CSV, "text/csv")
+        # --- FIXED DOWNLOAD BUTTON ---
+        st.download_button("Download Merge_CSV", master_df.to_csv(index=False).encode('utf-8'), "Merge.csv", "text/csv")
         
-    with tab3: # System Health (Task 2)
+    with tab3: # System Health
         st.markdown("### Anomaly Detection Logic")
         health_df = check_system_health(master_df)
         
@@ -383,7 +406,7 @@ if not master_df.empty:
             * **Light:** 0.0V - 5.0V
             """)
 
-    with tab4: # Compression Lab (Task 1)
+    with tab4: # Compression Lab
         st.markdown("### Frame Difference Compression Analysis")
         st.info("Calculates data savings by storing the **difference** (Delta) instead of full values.")
         
