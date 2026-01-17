@@ -3,77 +3,56 @@ import pandas as pd
 import streamlit as st
 from datetime import time
 
-# ---------------------------------
-# App Configuration
-# ---------------------------------
-st.set_page_config(page_title="Master Dataset Manager", layout="centered")
-st.title("Master Dataset Manager (12–12 Canonical Window)")
+# -------------------------------------------------
+# Config
+# -------------------------------------------------
+st.set_page_config(page_title="Master Dataset (12–12)", layout="centered")
+st.title("Master Dataset Manager (Flask Logic Preserved)")
 
 UPLOAD_FOLDER = "uploads"
 MASTER_CSV = "master_dataset.csv"
+MASTER_EXCEL = "master_dataset_colored.xlsx"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 MASTER_START = time(12, 0, 0)
-MASTER_END   = time(12, 0, 0)
+MASTER_END = time(12, 0, 0)
 
-# ---------------------------------
-# Utility: Normalize columns
-# ---------------------------------
-def normalize_columns(df):
-    df.columns = [c.strip().lower() for c in df.columns]
-    return df
-
-# ---------------------------------
-# Utility: Enforce 12–12 window
-# ---------------------------------
-def apply_12_12_window(df):
-    """
-    Keeps only timestamps belonging to 12:00 → next day 12:00
-    """
-    t = df["timestamp"].dt.time
+# -------------------------------------------------
+# Utility: enforce 12–12 window
+# -------------------------------------------------
+def apply_12_12(df):
+    t = df["Timestamp"].dt.time
     return df[(t >= MASTER_START) | (t < MASTER_END)]
 
-# ---------------------------------
-# Utility: Load Summary (12–12 aware)
-# ---------------------------------
+# -------------------------------------------------
+# Summary (same logic as Flask, 12–12 aware)
+# -------------------------------------------------
 def get_summary():
     if not os.path.exists(MASTER_CSV):
         return None
 
     df = pd.read_csv(MASTER_CSV)
-    df = normalize_columns(df)
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = apply_12_12(df)
 
-    # ENFORCE CANONICAL WINDOW BEFORE SUMMARY
-    df = apply_12_12_window(df)
+    status_counts = (
+        df["Status"].value_counts().to_dict()
+        if "Status" in df.columns else {}
+    )
 
     return {
         "total_rows": len(df),
-        "start_time": df["timestamp"].min(),
-        "end_time": df["timestamp"].max(),
-        "breakdown": df["sensor"].value_counts().to_dict()
+        "start_time": df["Timestamp"].min(),
+        "end_time": df["Timestamp"].max(),
+        "breakdown": df["Sensor_Name"].value_counts().to_dict(),
+        "status_counts": status_counts
     }
 
-# ---------------------------------
-# Load Master Dataset
-# ---------------------------------
-if os.path.exists(MASTER_CSV):
-    master_df = pd.read_csv(MASTER_CSV)
-    master_df = normalize_columns(master_df)
-    master_df["timestamp"] = pd.to_datetime(master_df["timestamp"], errors="coerce")
-
-    # ENFORCE 12–12 WINDOW ON LOAD
-    master_df = apply_12_12_window(master_df)
-else:
-    master_df = pd.DataFrame(
-        columns=["timestamp", "sensor", "voltage", "adc_value"]
-    )
-
-# ---------------------------------
-# Show Summary
-# ---------------------------------
+# -------------------------------------------------
+# Show summary
+# -------------------------------------------------
 summary = get_summary()
 
 if summary:
@@ -81,65 +60,117 @@ if summary:
     st.write("Total Rows:", summary["total_rows"])
     st.write("Start Time:", summary["start_time"])
     st.write("End Time:", summary["end_time"])
+    st.write("Sensor Breakdown:")
     st.json(summary["breakdown"])
+    st.write("Status Breakdown:")
+    st.json(summary["status_counts"])
 else:
     st.info("No master dataset yet.")
 
 st.divider()
 
-# ---------------------------------
-# Upload CSV
-# ---------------------------------
-uploaded_file = st.file_uploader("Upload CSV (any timestamp)", type=["csv"])
+# -------------------------------------------------
+# Upload CSV (same as Flask)
+# -------------------------------------------------
+uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
 if uploaded_file:
-    new_df = pd.read_csv(uploaded_file)
-    new_df = normalize_columns(new_df)
+    filepath = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
+    with open(filepath, "wb") as f:
+        f.write(uploaded_file.getbuffer())
 
-    required_cols = {"timestamp", "sensor", "voltage", "adc_value"}
-    if not required_cols.issubset(new_df.columns):
-        st.error("CSV must contain: timestamp, sensor, voltage, adc_value")
-        st.stop()
+    # 1. NEW DATA (Green)
+    new_df = pd.read_csv(filepath)
+    new_df["Timestamp"] = pd.to_datetime(new_df["Timestamp"], errors="coerce")
+    new_df["Sensor_Name"] = new_df["Sensor_Name"].astype(str).str.strip()
+    new_df["Status"] = "New"
 
-    new_df["timestamp"] = pd.to_datetime(new_df["timestamp"], errors="coerce")
-    new_df["sensor"] = new_df["sensor"].astype(str).str.strip()
+    # 2. OLD MASTER (White / Red)
+    if os.path.exists(MASTER_CSV):
+        master_df = pd.read_csv(MASTER_CSV)
+        master_df["Timestamp"] = pd.to_datetime(master_df["Timestamp"], errors="coerce")
+        master_df["Sensor_Name"] = master_df["Sensor_Name"].astype(str).str.strip()
+        master_df["Status"] = "Historical"
+    else:
+        master_df = pd.DataFrame()
 
-    # ENFORCE 12–12 WINDOW ON UPLOAD
-    new_df = apply_12_12_window(new_df)
+    # Enforce 12–12 window
+    new_df = apply_12_12(new_df)
+    if not master_df.empty:
+        master_df = apply_12_12(master_df)
 
-    before = len(master_df)
+    # 3. DETECT OVERLAP (RED)
+    if not master_df.empty:
+        master_keys = set(zip(master_df["Timestamp"], master_df["Sensor_Name"]))
+        new_keys = set(zip(new_df["Timestamp"], new_df["Sensor_Name"]))
+        overlap_keys = master_keys.intersection(new_keys)
 
-    # ---------------------------------
-    # CONCAT + REMOVE DUPLICATES
-    # ---------------------------------
-    combined_df = pd.concat([master_df, new_df], ignore_index=True)
+        def mark_overlap(row):
+            if (row["Timestamp"], row["Sensor_Name"]) in overlap_keys:
+                return "Overlap"
+            return "Historical"
 
+        master_df["Status"] = master_df.apply(mark_overlap, axis=1)
+
+    # 4. MERGE
+    combined_df = pd.concat([master_df, new_df])
+
+    # 5. SORT & DEDUP (KEEP MASTER)
+    combined_df = combined_df.sort_values("Timestamp")
     combined_df = combined_df.drop_duplicates(
-        subset=["timestamp", "sensor"],
+        subset=["Timestamp", "Sensor_Name"],
         keep="first"
     )
 
-    # Sort ascending
-    combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
+    combined_df = combined_df.reset_index(drop=True)
 
-    # Save
+    # 6. SAVE MASTER
     combined_df.to_csv(MASTER_CSV, index=False)
-    master_df = combined_df
 
-    st.success("CSV merged into 12–12 master dataset")
-    st.write("New rows added:", len(master_df) - before)
-    st.write("Total rows:", len(master_df))
+    # 7. COLORED EXCEL (safe)
+    def highlight_rows(row):
+        if row["Status"] == "New":
+            return ["background-color:#90EE90"] * len(row)
+        if row["Status"] == "Overlap":
+            return ["background-color:#FF7F7F"] * len(row)
+        if row["Status"] == "Historical":
+            return ["background-color:#FFFFFF"] * len(row)
+        return [""] * len(row)
 
-    st.dataframe(master_df.tail(20))
+    try:
+        import openpyxl
+        combined_df.style.apply(highlight_rows, axis=1)\
+            .to_excel(MASTER_EXCEL, index=False, engine="openpyxl")
+    except Exception:
+        pass
 
-# ---------------------------------
-# Download
-# ---------------------------------
+    os.remove(filepath)
+
+    st.success("CSV merged using Flask logic (12–12 enforced)")
+    st.dataframe(combined_df.tail(20))
+
+st.divider()
+
+# -------------------------------------------------
+# Downloads & Reset
+# -------------------------------------------------
 if os.path.exists(MASTER_CSV):
-    with open(MASTER_CSV, "rb") as f:
-        st.download_button(
-            "Download Master CSV",
-            f,
-            file_name="master_dataset.csv",
-            mime="text/csv"
-        )
+    st.download_button(
+        "Download Master CSV",
+        open(MASTER_CSV, "rb"),
+        file_name="master_dataset.csv"
+    )
+
+if os.path.exists(MASTER_EXCEL):
+    st.download_button(
+        "Download Colored Excel",
+        open(MASTER_EXCEL, "rb"),
+        file_name="master_dataset_colored.xlsx"
+    )
+
+if st.button("Reset Master Dataset"):
+    if os.path.exists(MASTER_CSV):
+        os.remove(MASTER_CSV)
+    if os.path.exists(MASTER_EXCEL):
+        os.remove(MASTER_EXCEL)
+    st.success("Master dataset reset. Reload page.")
