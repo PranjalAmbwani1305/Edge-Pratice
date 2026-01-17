@@ -15,8 +15,9 @@ ADC_MAX = 1023
 
 # --- 1. Page Config ---
 st.set_page_config(
-    page_title="SensorEdge", 
+    page_title="SensorEdge Enterprise", 
     layout="wide", 
+    page_icon="⚡",
     initial_sidebar_state="expanded"
 )
 
@@ -35,6 +36,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 2. Core Logic ---
+
 def normalize_sensor_names(name):
     """Forces all variations to standard 3 names."""
     n = str(name).strip().lower()
@@ -49,10 +51,14 @@ def load_and_clean_master():
     if os.path.exists(MASTER_CSV):
         try:
             df = pd.read_csv(MASTER_CSV)
-            # 1. Clean Headers
+            # 1. Clean Headers (Robust Mapping)
             df.columns = df.columns.str.strip().str.title()
-            rename_map = {'Time': 'Timestamp', 'Date': 'Timestamp', 'Sensor': 'Sensor_Name', 
-                          'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 'Adc': 'ADC_Value'}
+            rename_map = {
+                'Time': 'Timestamp', 'Date': 'Timestamp', 
+                'Sensor': 'Sensor_Name', 'Node': 'Sensor_Name', 'Source': 'Sensor_Name',
+                'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 
+                'Adc': 'ADC_Value', 'Adc_Value': 'ADC_Value', 'Adc Value': 'ADC_Value'
+            }
             df.rename(columns=rename_map, inplace=True)
             df = df.loc[:, ~df.columns.duplicated()] # Remove duplicate cols
 
@@ -92,14 +98,17 @@ def generate_spec_data():
         make("Light", 5, 0.0, 5.0)
     ]).sort_values('Timestamp').reset_index(drop=True)
 
-def process_merge_fast(master_df, new_df):
-    """Merges data and returns detailed stats."""
+def process_merge_fast(master_df, new_df, auto_shift=False):
+    """Merges data with optional Time-Shifting."""
     
     # --- 1. Pre-Processing ---
     new_df.columns = new_df.columns.str.strip().str.title()
-    rename_map = {'Time': 'Timestamp', 'Date': 'Timestamp', 'Sensor': 'Sensor_Name', 
-                  'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 'Adc': 'ADC_Value',
-                  'Node': 'Sensor_Name', 'Source': 'Sensor_Name'}
+    rename_map = {
+        'Time': 'Timestamp', 'Date': 'Timestamp', 
+        'Sensor': 'Sensor_Name', 'Node': 'Sensor_Name', 'Source': 'Sensor_Name',
+        'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 
+        'Adc': 'ADC_Value', 'Adc_Value': 'ADC_Value', 'Adc Value': 'ADC_Value'
+    }
     new_df.rename(columns=rename_map, inplace=True)
     new_df = new_df.loc[:, ~new_df.columns.duplicated()]
 
@@ -110,7 +119,7 @@ def process_merge_fast(master_df, new_df):
     new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp']).dt.round('1s')
     new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
     
-    # Auto-Repair Missing Values
+    # Auto-Repair Missing Values (Fixes 0% Accuracy)
     if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
     if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
     
@@ -120,7 +129,21 @@ def process_merge_fast(master_df, new_df):
     mask_a_miss = (new_df['ADC_Value'] == 0) & (new_df['Voltage_V'] > 0)
     new_df.loc[mask_a_miss, 'ADC_Value'] = (new_df.loc[mask_a_miss, 'Voltage_V'] / V_REF * ADC_MAX).astype(int)
 
-    # --- 3. Identify Status BEFORE Merge ---
+    # --- 3. AUTO-SHIFT TIME (Append Feature) ---
+    shifted_msg = ""
+    if auto_shift and not master_df.empty:
+        last_time = master_df['Timestamp'].max()
+        new_start = new_df['Timestamp'].min()
+        
+        # Calculate shift needed to place new data 1 sec after master data
+        if pd.notna(last_time) and pd.notna(new_start):
+            shift_delta = (last_time - new_start) + timedelta(seconds=1)
+            # Only shift if new data overlaps or is in the past
+            if shift_delta.total_seconds() > 0:
+                new_df['Timestamp'] = new_df['Timestamp'] + shift_delta
+                shifted_msg = f"(Shifted by {shift_delta})"
+
+    # --- 4. Identify Status BEFORE Merge ---
     new_df['Status'] = 'New' # Default to Green
     
     if not master_df.empty:
@@ -135,14 +158,14 @@ def process_merge_fast(master_df, new_df):
         overlap_mask = m_idx.isin(n_idx)
         master_df.loc[overlap_mask, 'Status'] = 'Overlap'
 
-    # --- 4. Merge & Deduplicate ---
+    # --- 5. Merge & Deduplicate ---
     initial_master_count = len(master_df)
     incoming_count = len(new_df)
     
     combined = pd.concat([master_df, new_df]).sort_values('Timestamp')
     combined = combined.loc[:, ~combined.columns.duplicated()]
     
-    # Keep 'first' preserves the Master row (which is now marked Red/Overlap or White/Historical)
+    # Keep 'first' preserves the Master row (Red/White)
     final = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
     
     final_count = len(final)
@@ -151,9 +174,9 @@ def process_merge_fast(master_df, new_df):
     
     report = f"""
     **Merge Report:**
-    * 📥 **Incoming Rows:** {incoming_count:,}
-    * ✨ **New Rows Added:** {added_rows:,} (Green)
-    * 🔄 **Duplicates Merged:** {merged_duplicates:,} (Red/Overlap)
+    * 📥 **Incoming:** {incoming_count:,} rows {shifted_msg}
+    * ✨ **Added:** {added_rows:,} (New Data)
+    * 🔄 **Merged:** {merged_duplicates:,} (Duplicates)
     """
     
     return final, report
@@ -164,7 +187,11 @@ def get_analytics(df):
     results = {}
     for sensor, sub in df.groupby('Sensor_Name'):
         exp = (sub['Voltage_V'] / V_REF * ADC_MAX).astype(int)
-        hw = (np.abs(sub['ADC_Value'] - exp) <= 1).mean() * 100
+        # Handle empty/zero cases safely
+        if len(sub) > 0:
+            hw = (np.abs(sub['ADC_Value'] - exp) <= 1).mean() * 100
+        else:
+            hw = 0.0
         results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
     
     # AI Check (Sampled)
@@ -187,7 +214,7 @@ master_df = st.session_state.master_df
 
 # --- Sidebar ---
 with st.sidebar:
-    st.title("⚡ Speed Control")
+    st.title("⚡ Control Panel")
     st.markdown("---")
     
     if st.button("Initialize 3-Sensor Data (Fast)"):
@@ -198,16 +225,20 @@ with st.sidebar:
             time.sleep(0.5)
             st.rerun()
             
+    st.markdown("### Upload & Merge")
+    # NEW: Checkbox to enable appending
+    append_mode = st.checkbox("Append as New Data (Shift Dates)", value=False, help="Checking this will shift the dates of your uploaded file to start AFTER the existing data, ensuring it gets added instead of merged.")
+    
     uploaded = st.file_uploader("Upload CSV", type=['csv'])
     if uploaded:
         new_raw = pd.read_csv(uploaded)
-        final_df, msg = process_merge_fast(master_df, new_raw)
+        final_df, msg = process_merge_fast(master_df, new_raw, auto_shift=append_mode)
         
         if final_df is not None:
             final_df.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = final_df
             st.success("Processed!")
-            st.markdown(msg) # Show detailed report
+            st.info(msg) # Show detailed report
         else:
             st.error(msg)
             
