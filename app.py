@@ -13,6 +13,13 @@ MASTER_CSV = 'master_edge_sensor_data.csv'
 V_REF = 5.0        
 ADC_MAX = 1023     
 
+# Defined Safety Limits
+SAFE_LIMITS = {
+    "Temperature": (2.0, 4.0),
+    "Moisture": (1.2, 3.0),
+    "Light": (0.0, 5.0)
+}
+
 # --- 1. Page Config ---
 st.set_page_config(
     page_title="SensorEdge", 
@@ -31,19 +38,26 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     h1, h2, h3 { font-family: 'Segoe UI', sans-serif; color: #2c3e50; }
+    .error-box {
+        background-color: #ffebee;
+        color: #c62828;
+        padding: 10px;
+        border-radius: 5px;
+        border: 1px solid #ef9a9a;
+        margin-bottom: 10px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # --- 2. Logic: Generation ---
 def generate_sensor_data(sensor_name, interval_seconds, v_min, v_max, duration_hours, start_time):
-    #
     total_seconds = duration_hours * 3600
     timestamps = [start_time + timedelta(seconds=i) for i in range(0, total_seconds, interval_seconds)]
     
     data = []
     for ts in timestamps:
         voltage = np.random.uniform(v_min, v_max)
-        adc_value = int((voltage / V_REF) * ADC_MAX) #
+        adc_value = int((voltage / V_REF) * ADC_MAX)
         
         data.append({
             "Timestamp": ts,
@@ -55,7 +69,6 @@ def generate_sensor_data(sensor_name, interval_seconds, v_min, v_max, duration_h
     return pd.DataFrame(data)
 
 def generate_full_dataset(start_date_obj):
-    #
     start_time = datetime.combine(start_date_obj, datetime.min.time())
     duration = 24 
     
@@ -137,6 +150,99 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
     
     return final_df, "\n".join(log_buffer)
 
+# --- 4. Logic: Compression ---
+def analyze_compression(df):
+    results = []
+    total_raw_bytes = 0
+    total_comp_bytes = 0
+    
+    for sensor, sub_raw in df.groupby('Sensor_Name'):
+        sub = sub_raw.sort_values('Timestamp').copy()
+        adc_values = sub['ADC_Value'].values
+        
+        if len(adc_values) == 0: continue
+            
+        raw_size = len(adc_values) * 2
+        comp_size = 2 
+        
+        if len(adc_values) > 1:
+            deltas = np.diff(adc_values)
+            small_deltas = (deltas >= -127) & (deltas <= 127)
+            num_small = np.sum(small_deltas)
+            num_large = len(deltas) - num_small
+            comp_size += (num_small * 1) + (num_large * 2)
+            
+        saved = raw_size - comp_size
+        pct = (saved / raw_size) * 100 if raw_size > 0 else 0
+        
+        total_raw_bytes += raw_size
+        total_comp_bytes += comp_size
+        
+        results.append({
+            "Sensor": sensor,
+            "Samples": len(adc_values),
+            "Raw Size (KB)": round(raw_size / 1024, 2),
+            "Compressed (KB)": round(comp_size / 1024, 2),
+            "Saved (%)": round(pct, 1)
+        })
+        
+    overall_saved = total_raw_bytes - total_comp_bytes
+    overall_pct = (overall_saved / total_raw_bytes * 100) if total_raw_bytes > 0 else 0
+    
+    summary = {
+        "Total Raw": round(total_raw_bytes / 1024, 2),
+        "Total Compressed": round(total_comp_bytes / 1024, 2),
+        "Total Saved KB": round(overall_saved / 1024, 2),
+        "Total Saved %": round(overall_pct, 1)
+    }
+    
+    return pd.DataFrame(results), summary
+
+# --- 5. Logic: Error Detection ---
+def check_system_health(df):
+    """Scans for range violations and stuck values."""
+    alerts = []
+    
+    for sensor, sub in df.groupby('Sensor_Name'):
+        # 1. Range Check
+        v_min, v_max = SAFE_LIMITS.get(sensor, (0, 5))
+        
+        # High Violations
+        high_mask = sub['Voltage_V'] > v_max
+        if high_mask.any():
+            count = high_mask.sum()
+            alerts.append({
+                "Severity": "Critical",
+                "Sensor": sensor,
+                "Issue": f"Voltage High (> {v_max}V)",
+                "Count": f"{count} records",
+                "Status": "Over Limit"
+            })
+            
+        # Low Violations
+        low_mask = sub['Voltage_V'] < v_min
+        if low_mask.any():
+            count = low_mask.sum()
+            alerts.append({
+                "Severity": "Warning",
+                "Sensor": sensor,
+                "Issue": f"Voltage Low (< {v_min}V)",
+                "Count": f"{count} records",
+                "Status": "Under Limit"
+            })
+            
+        # 2. Freeze Check
+        if len(sub) > 100 and sub['Voltage_V'].std() < 0.01:
+             alerts.append({
+                "Severity": "Critical",
+                "Sensor": sensor,
+                "Issue": "Sensor Frozen (No Variation)",
+                "Count": "All",
+                "Status": "Stuck"
+            })
+
+    return pd.DataFrame(alerts)
+
 def get_analytics(df):
     if df.empty or 'Voltage_V' not in df.columns: return {}
     results = {}
@@ -154,7 +260,6 @@ def get_analytics(df):
             
         results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
     
-    # AI Check
     clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
     clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
     
@@ -168,7 +273,7 @@ def get_analytics(df):
         except: pass
     return results
 
-# --- 4. Main App ---
+# --- 6. Main App ---
 
 # Initialize State
 if 'master_df' not in st.session_state:
@@ -183,7 +288,6 @@ if 'master_df' not in st.session_state:
     else:
         st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
 
-# Initialize Merge Log State
 if 'merge_log' not in st.session_state:
     st.session_state.merge_log = None
 
@@ -201,7 +305,7 @@ with st.sidebar:
             new_data = generate_full_dataset(start_date)
             new_data.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = new_data
-            st.session_state.merge_log = None # Clear old log
+            st.session_state.merge_log = None
             time.sleep(0.5)
             st.rerun()
 
@@ -216,9 +320,7 @@ with st.sidebar:
             
             final_df.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = final_df
-            st.session_state.merge_log = log_msg # Save log to state
-            
-            # Force Rerun to update main page
+            st.session_state.merge_log = log_msg
             st.rerun()
 
     st.markdown("---")
@@ -231,7 +333,6 @@ with st.sidebar:
 # --- Main Dashboard ---
 st.title("SensorEdge")
 
-# --- Display Merge Log Here (Top of Main Page) ---
 if st.session_state.merge_log:
     st.success("Merge Completed Successfully")
     st.code(st.session_state.merge_log, language="text")
@@ -254,7 +355,8 @@ if not master_df.empty:
     
     st.divider()
     
-    tab1, tab2 = st.tabs(["Accuracy Matrix", "Data Inspector"])
+    # NAVIGATION TABS
+    tab1, tab2, tab3, tab4 = st.tabs(["Accuracy Matrix", "Data Inspector", "System Health", "Compression Lab"])
     
     with tab1:
         if analytics:
@@ -282,5 +384,49 @@ if not master_df.empty:
             st.dataframe(view, use_container_width=True)
             
         st.download_button("Download Master CSV", master_df.to_csv(index=False).encode('utf-8'), MASTER_CSV, "text/csv")
+        
+    with tab3: # SYSTEM HEALTH
+        st.markdown("### Anomaly Detection Logic")
+        
+        health_df = check_system_health(master_df)
+        
+        if not health_df.empty:
+            c1, c2 = st.columns(2)
+            c1.error(f"{len(health_df)} Issues Detected")
+            c2.warning("Action Required: Check sensor calibration.")
+            
+            st.dataframe(
+                health_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Status": st.column_config.TextColumn("Status"),
+                    "Severity": st.column_config.TextColumn("Severity"),
+                }
+            )
+        else:
+            st.success("All Systems Nominal. No errors detected within defined limits.")
+            st.markdown("""
+            * **Temperature:** 2.0V - 4.0V
+            * **Moisture:** 1.2V - 3.0V
+            * **Light:** 0.0V - 5.0V
+            """)
+
+    with tab4: # COMPRESSION LAB
+        st.markdown("### Frame Difference Compression Analysis")
+        st.info("This tool calculates data savings by storing the **difference** between readings (Delta) instead of the full value.")
+        
+        if st.button("Run Compression Analysis"):
+            with st.spinner("Compressing data..."):
+                comp_df, comp_summary = analyze_compression(master_df)
+                
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Raw Size", f"{comp_summary['Total Raw']} KB")
+                m2.metric("Compressed", f"{comp_summary['Total Compressed']} KB")
+                m3.metric("Space Saved", f"{comp_summary['Total Saved KB']} KB", delta=f"{comp_summary['Total Saved %']}%")
+                m4.metric("Method", "Delta Encoding")
+                
+                st.dataframe(comp_df, use_container_width=True)
+                
 else:
     st.info("System Offline. Use sidebar to Initialize Data.")
