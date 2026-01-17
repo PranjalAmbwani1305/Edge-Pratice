@@ -3,13 +3,10 @@ import pandas as pd
 import numpy as np
 import os
 import time
-from datetime import datetime, timedelta
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from datetime import datetime, timedelta, date
 
 # --- Configuration ---
-MASTER_CSV = 'master_dataset.csv'
+MASTER_CSV = 'master_edge_sensor_data.csv'
 V_REF = 5.0        
 ADC_MAX = 1023     
 
@@ -35,265 +32,184 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. Core Logic ---
+# --- 2. Logic from sensor_database.ipynb ---
+def generate_sensor_data(sensor_name, interval_seconds, v_min, v_max, duration_hours, start_time):
+    # Calculate total seconds
+    total_seconds = duration_hours * 3600
+    
+    # Generate timestamps list
+    timestamps = [start_time + timedelta(seconds=i) for i in range(0, total_seconds, interval_seconds)]
+    
+    # Generate Data
+    data = []
+    for ts in timestamps:
+        voltage = np.random.uniform(v_min, v_max)
+        adc_value = int((voltage / V_REF) * ADC_MAX)
+        
+        data.append({
+            "Timestamp": ts,
+            "Sensor_Name": sensor_name,
+            "Voltage_V": round(voltage, 2),
+            "ADC_Value": adc_value
+        })
+    
+    return pd.DataFrame(data)
 
-def normalize_sensor_names(name):
-    """Forces all variations to standard 3 names."""
-    n = str(name).strip().lower()
-    if 'temp' in n or 'node_1' in n or 'node 1' in n: return 'Temperature'
-    if 'moist' in n or 'node_2' in n or 'node 2' in n: return 'Moisture'
-    if 'light' in n or 'node_3' in n or 'node 3' in n: return 'Light'
-    return n.title() 
+def generate_full_dataset(start_date_obj):
+    """Orchestrates the generation of all 3 sensors."""
+    # Convert date object to datetime (Midnight)
+    start_time = datetime.combine(start_date_obj, datetime.min.time())
+    duration = 24 # Hours
+    
+    # 1. Temperature (Every 2s, 2V-4V)
+    df_temp = generate_sensor_data("Temperature", 2, 2.0, 4.0, duration, start_time)
+    
+    # 2. Moisture (Every 4h, 1.2V-3V)
+    df_moist = generate_sensor_data("Moisture", 14400, 1.2, 3.0, duration, start_time)
+    
+    # 3. Light (Every 5s, 0V-5V)
+    df_light = generate_sensor_data("Light", 5, 0.0, 5.0, duration, start_time)
+    
+    # Combine & Sort
+    full_df = pd.concat([df_temp, df_moist, df_light])
+    full_df = full_df.sort_values(by="Timestamp").reset_index(drop=True)
+    
+    return full_df
 
-@st.cache_data(ttl=60)
-def load_and_clean_master():
-    """Loads and sanitizes the master dataset."""
+# --- 3. Logic from Update_Master.ipynb ---
+def merge_new_file_into_master(master_df, new_df):
+    """
+    Implements the exact logic from Update_Master.ipynb:
+    Concat -> Drop Duplicates (subset=['Timestamp', 'Sensor_Name'], keep='first')
+    """
+    old_count = len(master_df)
+    new_records_count = len(new_df)
+
+    # 1. Ensure Timestamp format
+    master_df['Timestamp'] = pd.to_datetime(master_df['Timestamp'])
+    new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp'])
+
+    # 2. Concat
+    combined_df = pd.concat([master_df, new_df])
+
+    # 3. Remove Duplicates
+    # keep='first' preserves Master data if overlaps occur
+    combined_df = combined_df.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
+
+    # 4. Sort
+    combined_df = combined_df.sort_values(by='Timestamp').reset_index(drop=True)
+
+    # Statistics
+    final_count = len(combined_df)
+    added_count = final_count - old_count
+    ignored_count = new_records_count - added_count
+    
+    return combined_df, added_count, ignored_count
+
+# --- 4. Helper: Load Master ---
+def load_master():
     if os.path.exists(MASTER_CSV):
         try:
             df = pd.read_csv(MASTER_CSV)
-            # 1. Clean Headers (Robust Mapping)
-            df.columns = df.columns.str.strip().str.title()
-            rename_map = {
-                'Time': 'Timestamp', 'Date': 'Timestamp', 
-                'Sensor': 'Sensor_Name', 'Node': 'Sensor_Name', 'Source': 'Sensor_Name',
-                'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 
-                'Adc': 'ADC_Value', 'Adc_Value': 'ADC_Value', 'Adc Value': 'ADC_Value'
-            }
-            df.rename(columns=rename_map, inplace=True)
-            df = df.loc[:, ~df.columns.duplicated()] # Remove duplicate cols
-
-            # 2. Add Missing Columns
-            for col in ['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status']:
-                if col not in df.columns:
-                    df[col] = 0 if 'Value' in col or 'Voltage' in col else None
-            
-            # 3. Format Data
-            if 'Timestamp' in df.columns:
-                df['Timestamp'] = pd.to_datetime(df['Timestamp']).dt.round('1s')
-            if 'Sensor_Name' in df.columns:
-                df['Sensor_Name'] = df['Sensor_Name'].apply(normalize_sensor_names)
-                
-            return df.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
+            df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+            return df
         except:
             pass
-    return pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status'])
+    return pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
 
-def generate_spec_data():
-    """Generates 24H Golden Dataset (00:00 to 23:59)."""
-    start = datetime(2024, 1, 1, 0, 0, 0)
-    duration = 24 * 3600
-    
-    def make(name, interval, v_min, v_max):
-        times = [start + timedelta(seconds=i) for i in range(0, duration, interval)]
-        volts = np.random.uniform(v_min, v_max, len(times))
-        adcs = (volts / V_REF * ADC_MAX).astype(int)
-        return pd.DataFrame({
-            'Timestamp': times, 'Sensor_Name': name, 
-            'Voltage_V': np.round(volts, 4), 'ADC_Value': adcs, 'Status': 'Historical'
-        })
-    
-    return pd.concat([
-        make("Temperature", 2, 2.0, 4.0),
-        make("Moisture", 14400, 1.2, 3.0),
-        make("Light", 5, 0.0, 5.0)
-    ]).sort_values('Timestamp').reset_index(drop=True)
+# --- 5. Streamlit App Layout ---
 
-def process_merge_fast(master_df, new_df, auto_shift=False):
-    """Merges data with optional Time-Shifting."""
-    
-    # --- 1. Pre-Processing ---
-    new_df.columns = new_df.columns.str.strip().str.title()
-    rename_map = {
-        'Time': 'Timestamp', 'Date': 'Timestamp', 
-        'Sensor': 'Sensor_Name', 'Node': 'Sensor_Name', 'Source': 'Sensor_Name',
-        'Voltage': 'Voltage_V', 'Volts': 'Voltage_V', 
-        'Adc': 'ADC_Value', 'Adc_Value': 'ADC_Value', 'Adc Value': 'ADC_Value'
-    }
-    new_df.rename(columns=rename_map, inplace=True)
-    new_df = new_df.loc[:, ~new_df.columns.duplicated()]
-
-    if 'Timestamp' not in new_df.columns or 'Sensor_Name' not in new_df.columns:
-        return None, "❌ Error: Missing 'Timestamp' or 'Sensor_Name' columns."
-
-    # --- 2. Normalize Incoming Data ---
-    new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp']).dt.round('1s')
-    new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
-    
-    # Auto-Repair Missing Values (Fixes 0% Accuracy)
-    if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
-    if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
-    
-    mask_v_miss = (new_df['Voltage_V'] == 0) & (new_df['ADC_Value'] > 0)
-    new_df.loc[mask_v_miss, 'Voltage_V'] = (new_df.loc[mask_v_miss, 'ADC_Value'] / ADC_MAX * V_REF).round(4)
-    
-    mask_a_miss = (new_df['ADC_Value'] == 0) & (new_df['Voltage_V'] > 0)
-    new_df.loc[mask_a_miss, 'ADC_Value'] = (new_df.loc[mask_a_miss, 'Voltage_V'] / V_REF * ADC_MAX).astype(int)
-
-    # --- 3. AUTO-SHIFT TIME (Append Feature) ---
-    shifted_msg = ""
-    if auto_shift and not master_df.empty:
-        last_time = master_df['Timestamp'].max()
-        new_start = new_df['Timestamp'].min()
-        
-        # Calculate shift needed to place new data 1 sec after master data
-        if pd.notna(last_time) and pd.notna(new_start):
-            shift_delta = (last_time - new_start) + timedelta(seconds=1)
-            # Only shift if new data overlaps or is in the past
-            if shift_delta.total_seconds() > 0:
-                new_df['Timestamp'] = new_df['Timestamp'] + shift_delta
-                shifted_msg = f"(Shifted by {shift_delta})"
-
-    # --- 4. Identify Status BEFORE Merge ---
-    new_df['Status'] = 'New' # Default to Green
-    
-    if not master_df.empty:
-        master_df['Timestamp'] = pd.to_datetime(master_df['Timestamp']).dt.round('1s')
-        master_df['Status'] = 'Historical' # Reset Master to White
-        
-        # Check Overlaps
-        m_idx = master_df.set_index(['Timestamp', 'Sensor_Name']).index
-        n_idx = new_df.set_index(['Timestamp', 'Sensor_Name']).index
-        
-        # Mark Overlapping Master Rows as RED
-        overlap_mask = m_idx.isin(n_idx)
-        master_df.loc[overlap_mask, 'Status'] = 'Overlap'
-
-    # --- 5. Merge & Deduplicate ---
-    initial_master_count = len(master_df)
-    incoming_count = len(new_df)
-    
-    combined = pd.concat([master_df, new_df]).sort_values('Timestamp')
-    combined = combined.loc[:, ~combined.columns.duplicated()]
-    
-    # Keep 'first' preserves the Master row (Red/White)
-    final = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
-    
-    final_count = len(final)
-    added_rows = final_count - initial_master_count
-    merged_duplicates = incoming_count - added_rows
-    
-    report = f"""
-    **Merge Report:**
-    * 📥 **Incoming:** {incoming_count:,} rows {shifted_msg}
-    * ✨ **Added:** {added_rows:,} (New Data)
-    * 🔄 **Merged:** {merged_duplicates:,} (Duplicates)
-    """
-    
-    return final, report
-
-def get_analytics(df):
-    """Calculates accuracy safely."""
-    if df.empty or 'Voltage_V' not in df.columns: return {}
-    results = {}
-    for sensor, sub in df.groupby('Sensor_Name'):
-        exp = (sub['Voltage_V'] / V_REF * ADC_MAX).astype(int)
-        # Handle empty/zero cases safely
-        if len(sub) > 0:
-            hw = (np.abs(sub['ADC_Value'] - exp) <= 1).mean() * 100
-        else:
-            hw = 0.0
-        results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
-    
-    # AI Check (Sampled)
-    clean = df.dropna(subset=['Voltage_V', 'Sensor_Name'])
-    if clean['Sensor_Name'].nunique() >= 2:
-        try:
-            s_df = clean.sample(min(1000, len(clean)), random_state=42)
-            clf = RandomForestClassifier(n_estimators=10, max_depth=5).fit(s_df[['Voltage_V']], s_df['Sensor_Name'])
-            report = classification_report(s_df['Sensor_Name'], clf.predict(s_df[['Voltage_V']]), output_dict=True, zero_division=0)
-            for s in results:
-                if s in report: results[s]['ai'] = report[s]['recall'] * 100
-        except: pass
-    return results
-
-# --- 3. App State ---
 if 'master_df' not in st.session_state:
-    st.session_state.master_df = load_and_clean_master()
+    st.session_state.master_df = load_master()
 
 master_df = st.session_state.master_df
 
-# --- Sidebar ---
+# Sidebar
 with st.sidebar:
     st.title("⚡ Control Panel")
     st.markdown("---")
     
-    if st.button("Initialize 3-Sensor Data (Fast)"):
-        with st.spinner("Generating 24h Data..."):
-            new_data = generate_spec_data()
-            new_data.to_csv(MASTER_CSV, index=False)
-            st.session_state.master_df = new_data
-            time.sleep(0.5)
-            st.rerun()
-            
-    st.markdown("### Upload & Merge")
-    # NEW: Checkbox to enable appending
-    append_mode = st.checkbox("Append as New Data (Shift Dates)", value=False, help="Checking this will shift the dates of your uploaded file to start AFTER the existing data, ensuring it gets added instead of merged.")
+    st.subheader("1. Initialize Master")
+    # CRITICAL: Let user pick date to match their CSV
+    start_date = st.date_input("Start Date", value=date(2026, 1, 17))
     
-    uploaded = st.file_uploader("Upload CSV", type=['csv'])
-    if uploaded:
-        new_raw = pd.read_csv(uploaded)
-        final_df, msg = process_merge_fast(master_df, new_raw, auto_shift=append_mode)
-        
-        if final_df is not None:
-            final_df.to_csv(MASTER_CSV, index=False)
-            st.session_state.master_df = final_df
-            st.success("Processed!")
-            st.info(msg) # Show detailed report
-        else:
-            st.error(msg)
-            
+    if st.button("Generate & Reset Master"):
+        with st.spinner("Generating dataset using logic from sensor_database.ipynb..."):
+            new_master = generate_full_dataset(start_date)
+            new_master.to_csv(MASTER_CSV, index=False)
+            st.session_state.master_df = new_master
+            st.success(f"Generated {len(new_master)} records for {start_date}!")
+            time.sleep(1)
+            st.rerun()
+
     st.markdown("---")
-    if st.button("Reset System", type="primary"):
-        if os.path.exists(MASTER_CSV): os.remove(MASTER_CSV)
-        st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status'])
+    st.subheader("2. Update Master")
+    uploaded_file = st.file_uploader("Upload CSV to Merge", type=['csv'])
+    
+    if uploaded_file:
+        new_df = pd.read_csv(uploaded_file)
+        
+        # Simple column normalization just in case
+        new_df.columns = new_df.columns.str.strip().str.title()
+        rename_map = {'Time': 'Timestamp', 'Date': 'Timestamp', 'Sensor': 'Sensor_Name', 'Node': 'Sensor_Name'}
+        new_df.rename(columns=rename_map, inplace=True)
+        
+        if 'Timestamp' in new_df.columns and 'Sensor_Name' in new_df.columns:
+            if st.button("Merge Data"):
+                updated_df, added, ignored = merge_new_file_into_master(master_df, new_df)
+                
+                updated_df.to_csv(MASTER_CSV, index=False)
+                st.session_state.master_df = updated_df
+                
+                st.success("Update Successful!")
+                st.markdown(f"""
+                **Statistics (Logic from Update_Master.ipynb):**
+                * Previous Master Size: `{len(master_df)}`
+                * New File Size: `{len(new_df)}`
+                * **Actually Added:** `{added}`
+                * **Duplicates Ignored:** `{ignored}`
+                * New Master Size: `{len(updated_df)}`
+                """)
+                time.sleep(2)
+                st.rerun()
+        else:
+            st.error("Uploaded file must have 'Timestamp' and 'Sensor_Name' columns.")
+
+    st.markdown("---")
+    if st.button("⚠️ Delete Master File"):
+        if os.path.exists(MASTER_CSV):
+            os.remove(MASTER_CSV)
+        st.session_state.master_df = pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value'])
         st.rerun()
 
-# --- 4. Dashboard ---
-st.title("SensorEdge Pro ⚡")
+# Main Dashboard
+st.title("SensorEdge Pro (Notebook Logic)")
 
 if not master_df.empty:
-    k1, k2, k3, k4 = st.columns(4)
-    analytics = get_analytics(master_df)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Records", f"{len(master_df):,}")
+    col2.metric("Sensors", master_df['Sensor_Name'].nunique())
     
-    avg_hw = np.mean([v['hw'] for v in analytics.values()]) if analytics else 0.0
-    avg_ai = np.mean([v['ai'] for v in analytics.values()]) if analytics else 0.0
-        
-    k1.metric("Total Records", f"{len(master_df):,}")
-    k2.metric("Active Sensors", master_df['Sensor_Name'].nunique())
-    k3.metric("Hardware Fidelity", f"{avg_hw:.1f}%")
-    k4.metric("AI Confidence", f"{avg_ai:.1f}%")
-    
+    # Calculate Time Range
+    t_min = master_df['Timestamp'].min()
+    t_max = master_df['Timestamp'].max()
+    col3.metric("Time Span", f"{t_max - t_min}")
+
     st.divider()
     
-    tab1, tab2 = st.tabs(["🎯 Accuracy Matrix", "🔍 Data Inspector"])
+    # Preview Data
+    st.subheader("Data Preview")
+    st.dataframe(master_df.head(100), use_container_width=True)
     
-    with tab1:
-        if analytics:
-            rows = [{"Sensor": s, "Count": f"{m['count']:,}", "HW Accuracy": m['hw']/100, "AI Accuracy": m['ai']/100} for s, m in analytics.items()]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                column_config={
-                    "HW Accuracy": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1),
-                    "AI Accuracy": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1)
-                })
-        else:
-            st.info("No valid data for analytics.")
-            
-    with tab2:
-        st.caption(f"Showing sample of {len(master_df):,} rows. Overlaps are RED, New data is GREEN.")
-        
-        # Robust Styler
-        def highlight_status(val):
-            if val == 'New': return 'background-color: #d1e7dd; color: #0f5132'
-            if val == 'Overlap': return 'background-color: #f8d7da; color: #842029'
-            return ''
-        
-        view = master_df.head(1000).copy()
-        try:
-            st.dataframe(view.style.map(highlight_status, subset=['Status']), use_container_width=True)
-        except:
-            st.dataframe(view, use_container_width=True)
-            
-        st.download_button("📥 Download Master CSV", master_df.to_csv(index=False).encode('utf-8'), "master_data.csv", "text/csv")
+    st.subheader("Recent Data")
+    st.dataframe(master_df.tail(100), use_container_width=True)
+    
+    st.download_button(
+        label="Download Master CSV",
+        data=master_df.to_csv(index=False).encode('utf-8'),
+        file_name=MASTER_CSV,
+        mime='text/csv'
+    )
 
 else:
-    st.info("System Offline. Use sidebar to Initialize Data.")
+    st.info("Master dataset is empty. Use the sidebar to Generate or Upload data.")
