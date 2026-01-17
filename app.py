@@ -10,7 +10,7 @@ st.set_page_config(page_title="Master Dataset Merger", layout="centered")
 st.title("Master Dataset (24-Hour) – Excel-Style Replace")
 
 # -------------------------------------------------
-# STEP 1: Generate random 24-hour master (ONE TIME)
+# STEP 1: Generate random 24-hour master (one time)
 # -------------------------------------------------
 def generate_master():
     sensors = {
@@ -42,7 +42,8 @@ def generate_master():
 if not os.path.exists(MASTER_FILE):
     master_df = generate_master()
 else:
-    master_df = pd.read_csv(MASTER_FILE, parse_dates=["Timestamp"])
+    master_df = pd.read_csv(MASTER_FILE)
+    master_df["Timestamp"] = pd.to_datetime(master_df["Timestamp"], errors="coerce")
 
 
 st.subheader("Current Master Dataset")
@@ -52,26 +53,43 @@ st.dataframe(master_df.tail(10))
 st.divider()
 
 # -------------------------------------------------
-# STEP 2: Upload user CSV and merge
+# STEP 2: Upload CSV and merge (SAFE)
 # -------------------------------------------------
 uploaded = st.file_uploader(
-    "Upload CSV (Timestamp, Sensor, Value)",
+    "Upload CSV (timestamp + sensor + value)",
     type="csv"
 )
 
 if uploaded:
-    new_df = pd.read_csv(uploaded, parse_dates=["Timestamp"])
+    # Read WITHOUT parse_dates
+    new_df = pd.read_csv(uploaded)
 
-    required = {"Timestamp", "Sensor", "Value"}
-    if not required.issubset(new_df.columns):
-        st.error("CSV must contain: Timestamp, Sensor, Value")
+    # Normalize column names
+    new_df.columns = [c.strip().lower() for c in new_df.columns]
+
+    # Detect timestamp column
+    if "timestamp" not in new_df.columns:
+        st.error("CSV must contain a timestamp column")
         st.stop()
+
+    if "sensor" not in new_df.columns or "value" not in new_df.columns:
+        st.error("CSV must contain sensor and value columns")
+        st.stop()
+
+    # Convert timestamp safely
+    new_df["timestamp"] = pd.to_datetime(new_df["timestamp"], errors="coerce")
+
+    # Rename to master schema
+    new_df = new_df.rename(columns={
+        "timestamp": "Timestamp",
+        "sensor": "Sensor",
+        "value": "Value"
+    })
 
     # CONCAT (NEW AFTER OLD)
     combined = pd.concat([master_df, new_df], ignore_index=True)
 
-    # 🔑 EXCEL-STYLE REPLACE:
-    # keep LAST → uploaded row replaces master row
+    # 🔑 EXCEL-STYLE REPLACE
     combined = combined.drop_duplicates(
         subset=["Timestamp", "Sensor"],
         keep="last"
