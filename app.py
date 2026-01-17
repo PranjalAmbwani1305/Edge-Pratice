@@ -49,7 +49,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. Logic: Generation ---
+# --- 2. Logic: Generation (from sensor_database.ipynb) ---
 def generate_sensor_data(sensor_name, interval_seconds, v_min, v_max, duration_hours, start_time):
     total_seconds = duration_hours * 3600
     timestamps = [start_time + timedelta(seconds=i) for i in range(0, total_seconds, interval_seconds)]
@@ -80,7 +80,7 @@ def generate_full_dataset(start_date_obj):
     full_df = full_df.sort_values(by="Timestamp").reset_index(drop=True)
     return full_df
 
-# --- 3. Logic: Merge ---
+# --- 3. Logic: Merge (from Update_Master.ipynb) ---
 def normalize_sensor_names(name):
     n = str(name).strip().lower()
     if 'temp' in n or 'node_1' in n: return 'Temperature'
@@ -88,8 +88,14 @@ def normalize_sensor_names(name):
     if 'light' in n or 'node_3' in n: return 'Light'
     return n.title()
 
-def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
-    # 1. Prepare New Data
+def merge_logic_exact(master_df, new_df):
+    """
+    Implements exact logic from Update_Master.ipynb
+    1. Load & Concat
+    2. Drop Duplicates (subset=Timestamp+Sensor, keep='first')
+    3. Sort
+    """
+    # 1. Prepare New Data (Standardization)
     new_df.columns = new_df.columns.str.strip().str.title()
     rename_map = {
         'Time': 'Timestamp', 'Date': 'Timestamp', 
@@ -100,17 +106,18 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
     new_df.rename(columns=rename_map, inplace=True)
     new_df = new_df.loc[:, ~new_df.columns.duplicated()]
 
+    # Format Timestamps (Round to 1s to ensure matching works)
     new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp']).dt.round('1s')
     new_df['Sensor_Name'] = new_df['Sensor_Name'].apply(normalize_sensor_names)
     
+    # Ensure numeric columns (Crash Prevention)
     if 'Voltage_V' not in new_df.columns: new_df['Voltage_V'] = 0.0
     if 'ADC_Value' not in new_df.columns: new_df['ADC_Value'] = 0
-    
     new_df['Voltage_V'] = pd.to_numeric(new_df['Voltage_V'], errors='coerce').fillna(0.0)
     new_df['ADC_Value'] = pd.to_numeric(new_df['ADC_Value'], errors='coerce').fillna(0).astype(int)
     new_df['Status'] = 'New'
 
-    # 2. Logic: Overlaps
+    # 2. Mark Overlaps (For UI visualization only)
     if not master_df.empty:
         master_df['Timestamp'] = pd.to_datetime(master_df['Timestamp']).dt.round('1s')
         master_df['Status'] = 'Historical'
@@ -118,11 +125,16 @@ def merge_logic_exact(master_df, new_df, filename="uploaded_file.csv"):
         n_idx = new_df.set_index(['Timestamp', 'Sensor_Name']).index
         master_df.loc[m_idx.isin(n_idx), 'Status'] = 'Overlap'
 
-    # 3. Notebook Merge Logic
+    # 3. MERGE STRATEGY
+    # "Concatenate (Stack) the dataframes"
     combined = pd.concat([master_df, new_df])
     
-    # keep='first' logic
+    # "Remove Duplicates"
+    # "keep='first' means: If the Master already has a record for this Time+Sensor,
+    # keep the Master's version and ignore the new file's version."
     final_df = combined.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first')
+    
+    # "Sort by Timestamp"
     final_df = final_df.sort_values(by='Timestamp').reset_index(drop=True)
     
     return final_df
@@ -213,30 +225,27 @@ def check_system_health(df):
             })
     return pd.DataFrame(alerts)
 
-# --- 6. Logic: AI Analysis (Random Forest) ---
+# --- 6. Logic: AI Analysis ---
 def train_ai_model(df):
+    # Prepare Data
     clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
     clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
     
     if len(clean) < 10 or clean['Sensor_Name'].nunique() < 2:
         return None, None, "Insufficient data to train model."
     
-    # Features & Target
     X = clean[['Voltage_V']]
     y = clean['Sensor_Name']
     
-    # Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
     
-    # Train Random Forest
+    # Random Forest
     clf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
     clf.fit(X_train, y_train)
     
-    # Evaluate
-    y_pred = clf.predict(X_test)
     acc = clf.score(X_test, y_test) * 100
     
-    # Confusion Matrix Report
+    y_pred = clf.predict(X_test)
     cm = confusion_matrix(y_test, y_pred, labels=clf.classes_)
     cm_df = pd.DataFrame(cm, index=clf.classes_, columns=clf.classes_)
     
@@ -259,7 +268,6 @@ def get_analytics(df):
             
         results[sensor] = {'count': len(sub), 'hw': hw, 'ai': 0.0}
     
-    # Quick AI Check (Simplified)
     clean = df.dropna(subset=['Voltage_V', 'Sensor_Name']).copy()
     clean['Voltage_V'] = pd.to_numeric(clean['Voltage_V'], errors='coerce').fillna(0)
     
@@ -311,7 +319,7 @@ with st.sidebar:
     if uploaded:
         if st.button("Run Merge Script"):
             new_raw = pd.read_csv(uploaded)
-            final_df = merge_logic_exact(master_df, new_raw, uploaded.name)
+            final_df = merge_logic_exact(master_df, new_raw)
             
             final_df.to_csv(MASTER_CSV, index=False)
             st.session_state.master_df = final_df
@@ -373,7 +381,6 @@ if not master_df.empty:
         
     with tab3:
         st.markdown("### Anomaly Detection Logic")
-        
         health_df = check_system_health(master_df)
         
         if not health_df.empty:
@@ -381,17 +388,9 @@ if not master_df.empty:
             c1.error(f"{len(health_df)} Issues Detected")
             c2.warning("Action Required: Check sensor calibration.")
             
-            st.dataframe(
-                health_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Status": st.column_config.TextColumn("Status"),
-                    "Severity": st.column_config.TextColumn("Severity"),
-                }
-            )
+            st.dataframe(health_df, use_container_width=True, hide_index=True)
         else:
-            st.success("All Systems Nominal. No errors detected within defined limits.")
+            st.success("All Systems Nominal.")
             st.markdown("""
             * **Temperature:** 2.0V - 4.0V
             * **Moisture:** 1.2V - 3.0V
@@ -415,7 +414,7 @@ if not master_df.empty:
                 st.dataframe(comp_df, use_container_width=True)
 
     with tab5:
-        st.markdown("### 🤖 Random Forest Classifier")
+        st.markdown("### Random Forest Classifier")
         st.caption("Trains a Machine Learning model to distinguish Sensor Types based on Voltage readings.")
         
         if st.button("Train & Evaluate Model"):
@@ -424,24 +423,15 @@ if not master_df.empty:
                 
                 if model:
                     st.success(f"Model Trained! Test Accuracy: **{acc:.2f}%**")
-                    
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown("#### Confusion Matrix")
-                        st.write("Shows how often the model correctly identified each sensor.")
                         st.dataframe(cm, use_container_width=True)
-                    
                     with c2:
                         st.markdown("#### Live Predictor")
-                        st.write("Test the model with manual input:")
-                        
                         test_volts = st.slider("Input Voltage (V)", 0.0, 5.0, 2.5)
                         prediction = model.predict([[test_volts]])[0]
-                        probs = model.predict_proba([[test_volts]])[0]
-                        
                         st.markdown(f"### Prediction: **{prediction}**")
-                        # Display probability bars
-                        st.bar_chart(pd.DataFrame(probs, index=model.classes_, columns=["Probability"]))
                         
 else:
     st.info("System Offline. Use sidebar to Initialize Data.")
