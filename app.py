@@ -331,12 +331,12 @@ if not master_df.empty:
     k1.metric("Total Records", f"{len(master_df):,}")
     k2.metric("Active Sensors", master_df['Sensor_Name'].nunique())
     k3.metric("Hardware Accuracy", f"{avg_hw:.1f}%")
-    k4.metric("AI Accuracy", f"{avg_ai:.1f}%")
+    k4.metric(" Accuracy", f"{avg_ai:.1f}%")
     
     st.divider()
     
     # FINAL TABS: Accuracy, Data Inspector, System Health, Compression Lab
-    tab1, tab2, tab3, tab4 = st.tabs(["Accuracy Matrix", "Data Inspector", "System Health", "Compression Lab"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Rows Value/Counts", "Data Inspector", "System Requirements", "Compression Lab"])
     
     with tab1:
         if analytics:
@@ -363,7 +363,7 @@ if not master_df.empty:
         except:
             st.dataframe(view, use_container_width=True)
             
-        st.download_button("Download Master CSV", master_df.to_csv(index=False).encode('utf-8'), MASTER_CSV, "text/csv")
+        st.download_button("Download  CSV", master_df.to_csv(index=False).encode('utf-8'), CSV, "text/csv")
         
     with tab3: # System Health (Task 2)
         st.markdown("### Anomaly Detection Logic")
