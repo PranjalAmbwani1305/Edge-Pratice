@@ -19,9 +19,13 @@ st.set_page_config(page_title="Edge Sensor Manager & Analytics", layout="wide", 
 def load_master():
     """Loads the master dataset if it exists."""
     if os.path.exists(MASTER_CSV):
-        df = pd.read_csv(MASTER_CSV)
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-        return df
+        try:
+            df = pd.read_csv(MASTER_CSV)
+            df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+            return df
+        except Exception as e:
+            st.error(f"Error loading master file: {e}")
+            return pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status'])
     return pd.DataFrame(columns=['Timestamp', 'Sensor_Name', 'Voltage_V', 'ADC_Value', 'Status'])
 
 def highlight_rows(row):
@@ -43,25 +47,33 @@ def to_excel(df):
     return output.getvalue()
 
 def calculate_accuracy_metrics(df):
-    """Calculates ADC consistency and ML Model Accuracy."""
-    if df.empty or len(df) < 10:
+    """Calculates ADC consistency and ML Model Accuracy (Crash-Proof Version)."""
+    
+    # --- SAFETY CHECK: Prevent Crash if Column is Missing ---
+    if 'Voltage_V' not in df.columns:
+        return 0.0, 0.0, "⚠️ Missing 'Voltage_V' column. Please Reset Data."
+
+    # Drop rows where Voltage_V might be NaN (cleanup)
+    df_clean = df.dropna(subset=['Voltage_V', 'ADC_Value', 'Sensor_Name'])
+
+    if df_clean.empty or len(df_clean) < 10:
         return 0.0, 0.0, "Not enough data"
 
     # 1. Hardware Accuracy (ADC Consistency)
-    # Formula: Does the digital count match the analog voltage?
-    # We allow a tiny margin of error (+/- 1 bit) for rounding differences.
-    expected_adc = (df['Voltage_V'] / V_REF * ADC_MAX).astype(int)
-    # Check if actual ADC is within 1 bit of expected
-    matches = (abs(df['ADC_Value'] - expected_adc) <= 1)
-    hardware_acc = matches.mean() * 100
+    try:
+        expected_adc = (df_clean['Voltage_V'] / V_REF * ADC_MAX).astype(int)
+        # Check if actual ADC is within 1 bit of expected (allow rounding differences)
+        matches = (abs(df_clean['ADC_Value'] - expected_adc) <= 1)
+        hardware_acc = matches.mean() * 100
+    except Exception as e:
+        return 0.0, 0.0, f"Calc Error: {e}"
 
     # 2. Model Accuracy (Sensor Identification)
-    # Can we guess the Sensor Name purely from Voltage?
     try:
-        X = df[['Voltage_V']]
-        y = df['Sensor_Name']
+        X = df_clean[['Voltage_V']]
+        y = df_clean['Sensor_Name']
         
-        # We need at least 2 classes to classify
+        # We need at least 2 classes (e.g., Light AND Temp) to classify
         if y.nunique() < 2:
             return hardware_acc, 0.0, "Need >1 Sensor Type"
 
@@ -86,10 +98,14 @@ master_df = load_master()
 # Top Level Metrics
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Records", len(master_df))
-if not master_df.empty:
+
+if not master_df.empty and 'Timestamp' in master_df.columns:
     col2.metric("Start Time", master_df['Timestamp'].min().strftime('%H:%M:%S'))
     col3.metric("End Time", master_df['Timestamp'].max().strftime('%H:%M:%S'))
-    col4.metric("Active Sensors", master_df['Sensor_Name'].nunique())
+    if 'Sensor_Name' in master_df.columns:
+        col4.metric("Active Sensors", master_df['Sensor_Name'].nunique())
+    else:
+        col4.metric("Active Sensors", 0)
 else:
     st.warning("No data found. Upload a CSV file to get started.")
 
@@ -105,38 +121,52 @@ with left_col:
     if uploaded_file is not None:
         st.info("Processing file...")
         
-        # --- MERGE LOGIC ---
-        new_df = pd.read_csv(uploaded_file)
-        new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp'], errors='coerce')
-        new_df['Sensor_Name'] = new_df['Sensor_Name'].astype(str).str.strip()
-        new_df['Status'] = 'New'  # Default to Green
+        try:
+            # --- MERGE LOGIC ---
+            new_df = pd.read_csv(uploaded_file)
+            
+            # Standardization
+            new_df['Timestamp'] = pd.to_datetime(new_df['Timestamp'], errors='coerce')
+            if 'Sensor_Name' in new_df.columns:
+                new_df['Sensor_Name'] = new_df['Sensor_Name'].astype(str).str.strip()
+            
+            # Ensure Voltage_V exists (if new file doesn't have it, fill 0 to prevent crash)
+            if 'Voltage_V' not in new_df.columns:
+                new_df['Voltage_V'] = 0.0
 
-        if not master_df.empty:
-            # 1. Mark old master as Historical
-            master_df['Status'] = 'Historical'
+            new_df['Status'] = 'New'  # Default to Green
+
+            if not master_df.empty:
+                # 1. Mark old master as Historical
+                master_df['Status'] = 'Historical'
+                
+                # 2. Detect Overlaps
+                # Check if required columns exist before zipping
+                if 'Timestamp' in master_df.columns and 'Sensor_Name' in master_df.columns:
+                    master_keys = set(zip(master_df['Timestamp'], master_df['Sensor_Name']))
+                    new_keys = set(zip(new_df['Timestamp'], new_df['Sensor_Name']))
+                    overlap_keys = master_keys.intersection(new_keys)
+                    
+                    # Apply Red status to Master rows that overlap
+                    master_df['Status'] = master_df.apply(
+                        lambda x: 'Overlap' if (x['Timestamp'], x['Sensor_Name']) in overlap_keys else 'Historical', axis=1
+                    )
             
-            # 2. Detect Overlaps
-            master_keys = set(zip(master_df['Timestamp'], master_df['Sensor_Name']))
-            new_keys = set(zip(new_df['Timestamp'], new_df['Sensor_Name']))
-            overlap_keys = master_keys.intersection(new_keys)
+            # 3. Combine
+            combined_df = pd.concat([master_df, new_df])
+            combined_df = combined_df.sort_values(by='Timestamp')
             
-            # Apply Red status to Master rows that overlap
-            master_df['Status'] = master_df.apply(
-                lambda x: 'Overlap' if (x['Timestamp'], x['Sensor_Name']) in overlap_keys else 'Historical', axis=1
-            )
-        
-        # 3. Combine
-        combined_df = pd.concat([master_df, new_df])
-        combined_df = combined_df.sort_values(by='Timestamp')
-        
-        # 4. Deduplicate (Keep 'first' -> keeps the Red Overlap from Master, drops the Green Duplicate)
-        final_df = combined_df.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first').reset_index(drop=True)
-        
-        # 5. Save
-        final_df.to_csv(MASTER_CSV, index=False)
-        
-        st.success(f"Merged successfully! Total rows: {len(final_df)}")
-        st.experimental_rerun()
+            # 4. Deduplicate (Keep 'first' -> keeps the Red Overlap from Master)
+            final_df = combined_df.drop_duplicates(subset=['Timestamp', 'Sensor_Name'], keep='first').reset_index(drop=True)
+            
+            # 5. Save
+            final_df.to_csv(MASTER_CSV, index=False)
+            
+            st.success(f"Merged successfully! Total rows: {len(final_df)}")
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Error processing file: {e}")
 
 with right_col:
     st.subheader("🧠 Intelligence & Accuracy")
@@ -156,7 +186,9 @@ with right_col:
             help="Can AI predict the Sensor Type just from Voltage?"
         )
         
-        if model_acc < 85:
+        if status_msg != "Success":
+            st.caption(f"ℹ️ Note: {status_msg}")
+        elif model_acc < 85:
             st.caption("⚠️ **Insight:** Low Model Accuracy suggests sensors (like Light/Temp) have overlapping voltage ranges.")
         else:
             st.caption("✅ **Insight:** Distinct voltage ranges allow for high identification accuracy.")
@@ -165,7 +197,7 @@ with right_col:
 st.divider()
 st.subheader("📈 Real-time Sensor Visualization")
 
-if not master_df.empty:
+if not master_df.empty and 'Sensor_Name' in master_df.columns:
     # Filter by sensor type
     sensors = master_df['Sensor_Name'].unique().tolist()
     selected_sensors = st.multiselect("Select Sensors to View", sensors, default=sensors)
@@ -174,8 +206,11 @@ if not master_df.empty:
         filtered_df = master_df[master_df['Sensor_Name'].isin(selected_sensors)]
         
         # Pivot for chart: Index=Time, Columns=Sensor, Values=Voltage
-        chart_data = filtered_df.pivot_table(index='Timestamp', columns='Sensor_Name', values='Voltage_V', aggfunc='first')
-        st.line_chart(chart_data)
+        if 'Voltage_V' in filtered_df.columns:
+            chart_data = filtered_df.pivot_table(index='Timestamp', columns='Sensor_Name', values='Voltage_V', aggfunc='first')
+            st.line_chart(chart_data)
+        else:
+            st.warning("Voltage data missing for visualization.")
     
     # --- Data Table & Export ---
     st.subheader("📋 Master Dataset View")
@@ -213,4 +248,4 @@ with st.sidebar:
     if st.button("⚠️ Factory Reset Data"):
         if os.path.exists(MASTER_CSV):
             os.remove(MASTER_CSV)
-        st.experimental_rerun()
+        st.rerun()
